@@ -3,6 +3,10 @@
 Built with love by Moon Dev 🚀
 """
 
+# Model override settings - Adding DeepSeek support
+MODEL_OVERRIDE = "0"  # Set to "deepseek-chat" or "deepseek-reasoner" to use DeepSeek, "0" to use default
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"  # Base URL for DeepSeek API
+
 # 🛡️ Risk Override Prompt - The Secret Sauce!
 RISK_OVERRIDE_PROMPT = """
 You are Moon Dev's Risk Management AI 🛡️
@@ -43,6 +47,7 @@ import pandas as pd
 import json
 from termcolor import colored, cprint
 from dotenv import load_dotenv
+import openai
 from src import config
 from src import nice_funcs as n
 from nice_funcs import get_data
@@ -51,6 +56,7 @@ from datetime import datetime, timedelta
 import time
 from src.config import *
 from src.agents.base_agent import BaseAgent
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -60,11 +66,46 @@ class RiskAgent(BaseAgent):
         """Initialize Moon Dev's Risk Agent 🛡️"""
         super().__init__('risk')  # Initialize base agent with type
         
-        api_key = os.getenv("ANTHROPIC_KEY")
-        if not api_key:
+        # Set AI parameters - use config values unless overridden
+        self.ai_model = AI_MODEL if AI_MODEL else config.AI_MODEL
+        self.ai_temperature = AI_TEMPERATURE if AI_TEMPERATURE > 0 else config.AI_TEMPERATURE
+        self.ai_max_tokens = AI_MAX_TOKENS if AI_MAX_TOKENS > 0 else config.AI_MAX_TOKENS
+        
+        print(f"🤖 Using AI Model: {self.ai_model}")
+        if AI_MODEL or AI_TEMPERATURE > 0 or AI_MAX_TOKENS > 0:
+            print("⚠️ Note: Using some override settings instead of config.py defaults")
+            if AI_MODEL:
+                print(f"  - Model: {AI_MODEL}")
+            if AI_TEMPERATURE > 0:
+                print(f"  - Temperature: {AI_TEMPERATURE}")
+            if AI_MAX_TOKENS > 0:
+                print(f"  - Max Tokens: {AI_MAX_TOKENS}")
+                
+        load_dotenv()
+        
+        # Get API keys
+        openai_key = os.getenv("OPENAI_KEY")
+        anthropic_key = os.getenv("ANTHROPIC_KEY")
+        deepseek_key = os.getenv("DEEPSEEK_KEY")
+        
+        if not openai_key:
+            raise ValueError("🚨 OPENAI_KEY not found in environment variables!")
+        if not anthropic_key:
             raise ValueError("🚨 ANTHROPIC_KEY not found in environment variables!")
             
-        self.client = anthropic.Anthropic(api_key=api_key)
+        # Initialize OpenAI client for DeepSeek
+        if deepseek_key and MODEL_OVERRIDE.lower() == "deepseek-chat":
+            self.deepseek_client = openai.OpenAI(
+                api_key=deepseek_key,
+                base_url=DEEPSEEK_BASE_URL
+            )
+            print("🚀 DeepSeek model initialized!")
+        else:
+            self.deepseek_client = None
+            
+        # Initialize Anthropic client
+        self.client = anthropic.Anthropic(api_key=anthropic_key)
+        
         self.override_active = False
         self.last_override_check = None
         
@@ -80,44 +121,80 @@ class RiskAgent(BaseAgent):
         total_value = 0.0
         
         try:
+            print("\n🔍 Moon Dev's Portfolio Value Calculator Starting... 🚀")
+            
             # Get USDC balance first
-            usdc_value = n.get_token_balance_usd(config.USDC_ADDRESS)
-            total_value += usdc_value
+            print("💵 Getting USDC balance...")
+            try:
+                print(f"🔍 Checking USDC balance for address: {config.USDC_ADDRESS}")
+                usdc_value = n.get_token_balance_usd(config.USDC_ADDRESS)
+                print(f"✅ USDC Value: ${usdc_value:.2f}")
+                total_value += usdc_value
+            except Exception as e:
+                print(f"❌ Error getting USDC balance: {str(e)}")
+                print(f"🔍 Debug info - USDC Address: {config.USDC_ADDRESS}")
+                traceback.print_exc()
             
             # Get balance of each monitored token
+            print("\n📊 Getting monitored token balances...")
+            print(f"🎯 Total tokens to check: {len(config.MONITORED_TOKENS)}")
+            print(f"📝 Token list: {config.MONITORED_TOKENS}")
+            
             for token in config.MONITORED_TOKENS:
                 if token != config.USDC_ADDRESS:  # Skip USDC as we already counted it
-                    token_value = n.get_token_balance_usd(token)
-                    total_value += token_value
-                    
+                    try:
+                        print(f"\n🪙 Checking token: {token[:8]}...")
+                        token_value = n.get_token_balance_usd(token)
+                        if token_value > 0:
+                            print(f"💰 Found position worth: ${token_value:.2f}")
+                            total_value += token_value
+                        else:
+                            print("ℹ️ No balance found for this token")
+                    except Exception as e:
+                        print(f"❌ Error getting balance for {token[:8]}: {str(e)}")
+                        print("🔍 Full error trace:")
+                        traceback.print_exc()
+            
+            print(f"\n💎 Moon Dev's Total Portfolio Value: ${total_value:.2f} 🌙")
             return total_value
             
         except Exception as e:
             cprint(f"❌ Error calculating portfolio value: {str(e)}", "white", "on_red")
+            print("🔍 Full error trace:")
+            traceback.print_exc()
             return 0.0
 
     def log_daily_balance(self):
         """Log portfolio value if not logged in past check period"""
         try:
+            print("\n📝 Checking if we need to log daily balance...")
+            
             # Create data directory if it doesn't exist
             os.makedirs('src/data', exist_ok=True)
             balance_file = 'src/data/portfolio_balance.csv'
+            print(f"📁 Using balance file: {balance_file}")
             
             # Check if we already have a recent log
             if os.path.exists(balance_file):
+                print("✅ Found existing balance log file")
                 df = pd.read_csv(balance_file)
                 if not df.empty:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     last_log = df['timestamp'].max()
                     hours_since_log = (datetime.now() - last_log).total_seconds() / 3600
                     
+                    print(f"⏰ Hours since last log: {hours_since_log:.1f}")
+                    print(f"⚙️ Max hours between checks: {config.MAX_LOSS_GAIN_CHECK_HOURS}")
+                    
                     if hours_since_log < config.MAX_LOSS_GAIN_CHECK_HOURS:
                         cprint(f"✨ Recent balance log found ({hours_since_log:.1f} hours ago)", "white", "on_blue")
                         return
             else:
+                print("📊 Creating new balance log file")
                 df = pd.DataFrame(columns=['timestamp', 'balance'])
             
             # Get current portfolio value
+            print("\n💰 Getting fresh portfolio value...")
             current_value = self.get_portfolio_value()
             
             # Add new row
@@ -125,6 +202,8 @@ class RiskAgent(BaseAgent):
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'balance': current_value
             }
+            print(f"📝 Adding new balance record: {new_row}")
+            
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             
             # Save updated log
@@ -133,6 +212,7 @@ class RiskAgent(BaseAgent):
             
         except Exception as e:
             cprint(f"❌ Error logging balance: {str(e)}", "white", "on_red")
+            traceback.print_exc()  # Print full stack trace
 
     def get_position_data(self, token):
         """Get recent market data for a token"""
@@ -199,23 +279,50 @@ class RiskAgent(BaseAgent):
             )
             
             cprint("🤖 AI Agent analyzing market data...", "white", "on_green")
-            message = self.client.messages.create(
-                model=config.AI_MODEL,
-                max_tokens=config.AI_MAX_TOKENS,
-                temperature=config.AI_TEMPERATURE,
-                messages=[{"role": "user", "content": prompt}]
-            )
             
-            # Get the response content and ensure it's a string
-            response = str(message.content) if message.content else ""
+            # Use DeepSeek if configured
+            if self.deepseek_client and MODEL_OVERRIDE.lower() == "deepseek-chat":
+                print("🚀 Using DeepSeek for analysis...")
+                response = self.deepseek_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are Moon Dev's Risk Management AI. Analyze positions and respond with OVERRIDE or RESPECT_LIMIT."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    stream=False
+                )
+                response_text = response.choices[0].message.content.strip()
+            else:
+                # Use Claude as before
+                print("🤖 Using Claude for analysis...")
+                message = self.client.messages.create(
+                    model=self.ai_model,
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    messages=[{
+                        "role": "user",
+                        "content": prompt
+                    }]
+                )
+                response_text = str(message.content)
+            
+            # Handle TextBlock format if using Claude
+            if 'TextBlock' in response_text:
+                match = re.search(r"text='([^']*)'", response_text)
+                if match:
+                    response_text = match.group(1)
+            
             self.last_override_check = datetime.now()
             
             # Check if we should override (keep positions open)
-            self.override_active = "OVERRIDE" in response.upper()
+            self.override_active = "OVERRIDE" in response_text.upper()
             
-            # Print the AI's reasoning
+            # Print the AI's reasoning with model info
             cprint("\n🧠 Risk Agent Analysis:", "white", "on_blue")
-            print(response)
+            cprint(f"Using model: {'DeepSeek' if self.deepseek_client else 'Claude'}", "white", "on_blue")
+            print(response_text)
             
             if self.override_active:
                 cprint("\n🤖 Risk Agent suggests keeping positions open", "white", "on_yellow")
@@ -389,28 +496,48 @@ Respond with:
 CLOSE_ALL or HOLD_POSITIONS
 Then explain your reasoning.
 """
-            # Get AI decision
-            message = self.client.messages.create(
-                model=AI_MODEL,
-                max_tokens=AI_MAX_TOKENS,
-                temperature=AI_TEMPERATURE,
-                messages=[{
-                    "role": "user",
-                    "content": prompt
-                }]
-            )
+            # Use DeepSeek if configured
+            if self.deepseek_client and MODEL_OVERRIDE.lower() == "deepseek-chat":
+                print("🚀 Using DeepSeek for analysis...")
+                response = self.deepseek_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are Moon Dev's Risk Management AI. Analyze the breach and decide whether to close positions."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    stream=False
+                )
+                response_text = response.choices[0].message.content.strip()
+            else:
+                # Use Claude as before
+                print("🤖 Using Claude for analysis...")
+                message = self.client.messages.create(
+                    model=self.ai_model,
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    messages=[{
+                        "role": "user",
+                        "content": prompt
+                    }]
+                )
+                response_text = str(message.content)
             
-            response = message.content
-            if isinstance(response, list):
-                response = '\n'.join([item.text if hasattr(item, 'text') else str(item) for item in response])
+            # Handle TextBlock format if using Claude
+            if 'TextBlock' in response_text:
+                match = re.search(r"text='([^']*)'", response_text)
+                if match:
+                    response_text = match.group(1)
             
             print("\n🤖 AI Risk Assessment:")
             print("=" * 50)
-            print(response)
+            print(f"Using model: {'DeepSeek' if self.deepseek_client else 'Claude'}")
+            print(response_text)
             print("=" * 50)
             
             # Parse decision
-            decision = response.split('\n')[0].strip()
+            decision = response_text.split('\n')[0].strip()
             
             if decision == "CLOSE_ALL":
                 print("🚨 AI recommends closing all positions!")

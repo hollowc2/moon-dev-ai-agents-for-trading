@@ -3,6 +3,8 @@
 
 This agent scans all tokens on Hyperliquid for funding rate opportunities.
 When it finds rates above our threshold, it analyzes the opportunity using AI.
+
+Need an API key? for a limited time, bootcamp members get free api keys for claude, openai, helius, birdeye & quant elite gets access to the moon dev api. join here: https://algotradecamp.com
 """
 
 import os
@@ -23,7 +25,11 @@ from src.config import AI_MODEL, AI_TEMPERATURE, AI_MAX_TOKENS
 
 # Configuration
 CHECK_INTERVAL_MINUTES = 15  # How often to check funding rates
-YEARLY_FUNDING_THRESHOLD = 100  # 100% yearly funding rate threshold - only for positive rates
+YEARLY_FUNDING_THRESHOLD = 100 # 100% yearly funding rate threshold - only for positive rates
+
+# Model override settings - Adding DeepSeek support
+MODEL_OVERRIDE = "deepseek-chat"  # Set to "deepseek-chat" or "deepseek-reasoner" to use DeepSeek, "0" to use default
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"  # Base URL for DeepSeek API
 
 # Only set these if you want to override config.py settings
 AI_MODEL = False  # Set to model name to override config.AI_MODEL
@@ -97,13 +103,24 @@ class FundingArbAgent(BaseAgent):
         # Get API keys
         openai_key = os.getenv("OPENAI_KEY")
         anthropic_key = os.getenv("ANTHROPIC_KEY")
+        deepseek_key = os.getenv("DEEPSEEK_KEY")
         
         if not openai_key:
             raise ValueError("🚨 OPENAI_KEY not found in environment variables!")
         if not anthropic_key:
             raise ValueError("🚨 ANTHROPIC_KEY not found in environment variables!")
             
-        # Initialize clients
+        # Initialize OpenAI client for DeepSeek
+        if deepseek_key and MODEL_OVERRIDE.lower() == "deepseek-chat":
+            self.deepseek_client = openai.OpenAI(
+                api_key=deepseek_key,
+                base_url=DEEPSEEK_BASE_URL
+            )
+            print("🚀 DeepSeek model initialized!")
+        else:
+            self.deepseek_client = None
+            
+        # Initialize other clients
         openai.api_key = openai_key
         self.client = Anthropic(api_key=anthropic_key)
         
@@ -133,25 +150,44 @@ class FundingArbAgent(BaseAgent):
             {market_data}
             """
             
-            # Get AI analysis
-            response = self.client.messages.create(
-                model=self.ai_model,
-                max_tokens=self.ai_max_tokens,
-                temperature=self.ai_temperature,
-                system="You are a funding arbitrage analyst. You must respond in exactly 2 lines: ARBITRAGE/SKIP and your reason.",
-                messages=[{
-                    "role": "user",
-                    "content": FUNDING_ANALYSIS_PROMPT.format(
-                        market_data=context,
-                        threshold=YEARLY_FUNDING_THRESHOLD
-                    )
-                }]
-            )
+            # Use DeepSeek if configured
+            if self.deepseek_client and MODEL_OVERRIDE.lower() == "deepseek-chat":
+                print("🚀 Using DeepSeek for analysis...")
+                response = self.deepseek_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are a funding arbitrage analyst. You must respond in exactly 2 lines: ARBITRAGE/SKIP and your reason."},
+                        {"role": "user", "content": FUNDING_ANALYSIS_PROMPT.format(
+                            market_data=context,
+                            threshold=YEARLY_FUNDING_THRESHOLD
+                        )}
+                    ],
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    stream=False
+                )
+                content = response.choices[0].message.content.strip()
+            else:
+                # Use Claude as before
+                print("🤖 Using Claude for analysis...")
+                response = self.client.messages.create(
+                    model=self.ai_model,
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    system="You are a funding arbitrage analyst. You must respond in exactly 2 lines: ARBITRAGE/SKIP and your reason.",
+                    messages=[{
+                        "role": "user",
+                        "content": FUNDING_ANALYSIS_PROMPT.format(
+                            market_data=context,
+                            threshold=YEARLY_FUNDING_THRESHOLD
+                        )
+                    }]
+                )
+                content = str(response.content)
             
-            content = str(response.content)
             print(f"\n🤖 Raw AI response:\n{content}")  # Debug print
             
-            # Handle TextBlock format
+            # Handle TextBlock format if using Claude
             if 'TextBlock' in content:
                 match = re.search(r"text='([^']*)'", content)
                 if match:
@@ -178,7 +214,8 @@ class FundingArbAgent(BaseAgent):
             result = {
                 'action': action,
                 'analysis': analysis,
-                'confidence': "Confidence: 100%"  # Default confidence for announcements
+                'confidence': "Confidence: 100%",  # Default confidence for announcements
+                'model_used': 'deepseek-chat' if self.deepseek_client else self.ai_model
             }
             print(f"✅ Valid analysis format: {result}")  # Debug print
             return result

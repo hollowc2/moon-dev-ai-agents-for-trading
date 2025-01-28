@@ -7,6 +7,8 @@ video for copy bot: https://youtu.be/tQPRW19Qcak?si=b6rAGpz4CuXKXyzn
 think about list
 - not all these tokens will have OHLCV data so we need to address that some how
 - good to pass in BTC/ETH data too in order to see market structure
+
+Need an API key? for a limited time, bootcamp members get free api keys for claude, openai, helius, birdeye & quant elite gets access to the moon dev api. join here: https://algotradecamp.com
 """
 
 import os

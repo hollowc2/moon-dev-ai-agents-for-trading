@@ -3,6 +3,8 @@
 Built with love by Moon Dev 🚀
 
 Luna the Liquidation Agent tracks sudden increases in liquidation volume and announces when she sees potential market moves
+
+Need an API key? for a limited time, bootcamp members get free api keys for claude, openai, helius, birdeye & quant elite gets access to the moon dev api. join here: https://algotradecamp.com
 """
 
 import os
@@ -21,6 +23,7 @@ from collections import deque
 from src.agents.base_agent import BaseAgent
 import traceback
 import numpy as np
+import re
 
 # Get the project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -29,6 +32,10 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 CHECK_INTERVAL_MINUTES = 10  # How often to check liquidations
 LIQUIDATION_ROWS = 10000   # Number of rows to fetch each time
 LIQUIDATION_THRESHOLD = .5  # Multiplier for average liquidation to detect significant events
+
+# Model override settings - Adding DeepSeek support
+MODEL_OVERRIDE = "deepseek-chat"  # Set to "deepseek-chat" or "deepseek-reasoner" to use DeepSeek, "0" to use default
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"  # Base URL for DeepSeek API
 
 # OHLCV Data Settings
 TIMEFRAME = '15m'  # Candlestick timeframe
@@ -101,12 +108,24 @@ class LiquidationAgent(BaseAgent):
         # Get API keys
         openai_key = os.getenv("OPENAI_KEY")
         anthropic_key = os.getenv("ANTHROPIC_KEY")
+        deepseek_key = os.getenv("DEEPSEEK_KEY")
         
         if not openai_key:
             raise ValueError("🚨 OPENAI_KEY not found in environment variables!")
         if not anthropic_key:
             raise ValueError("🚨 ANTHROPIC_KEY not found in environment variables!")
             
+        # Initialize OpenAI client for DeepSeek
+        if deepseek_key and MODEL_OVERRIDE.lower() == "deepseek-chat":
+            self.deepseek_client = openai.OpenAI(
+                api_key=deepseek_key,
+                base_url=DEEPSEEK_BASE_URL
+            )
+            print("🚀 DeepSeek model initialized!")
+        else:
+            self.deepseek_client = None
+            
+        # Initialize other clients
         openai.api_key = openai_key
         self.client = anthropic.Anthropic(api_key=anthropic_key)
         
@@ -123,7 +142,7 @@ class LiquidationAgent(BaseAgent):
         self.load_history()
         
         print("🌊 Luna the Liquidation Agent initialized!")
-        print(f"🎯 Alerting on liquidation increases above {(LIQUIDATION_THRESHOLD-1)*100:.0f}%")
+        print(f"🎯 Alerting on liquidation increases above +{LIQUIDATION_THRESHOLD*100:.0f}% from previous")
         print(f"📊 Analyzing last {LIQUIDATION_ROWS} liquidation events")
         print(f"📈 Using {LOOKBACK_BARS} {TIMEFRAME} candles for market context")
         
@@ -303,34 +322,47 @@ class LiquidationAgent(BaseAgent):
             
             print(f"\n🤖 Analyzing liquidation spike with AI...")
             
-            # Get AI analysis using instance settings
-            message = self.client.messages.create(
-                model=self.ai_model,
-                max_tokens=self.ai_max_tokens,
-                temperature=self.ai_temperature,
-                messages=[{
-                    "role": "user",
-                    "content": context
-                }]
-            )
+            # Use DeepSeek if configured
+            if self.deepseek_client and MODEL_OVERRIDE.lower() == "deepseek-chat":
+                print("🚀 Using DeepSeek for analysis...")
+                response = self.deepseek_client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[
+                        {"role": "system", "content": "You are a liquidation analyst. You must respond in exactly 3 lines: BUY/SELL/NOTHING, reason, and confidence."},
+                        {"role": "user", "content": context}
+                    ],
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    stream=False
+                )
+                response_text = response.choices[0].message.content.strip()
+            else:
+                # Use Claude as before
+                print("🤖 Using Claude for analysis...")
+                message = self.client.messages.create(
+                    model=self.ai_model,
+                    max_tokens=self.ai_max_tokens,
+                    temperature=self.ai_temperature,
+                    messages=[{
+                        "role": "user",
+                        "content": context
+                    }]
+                )
+                response_text = str(message.content)
             
             # Handle response
-            if not message or not message.content:
+            if not response_text:
                 print("❌ No response from AI")
                 return None
                 
-            # Handle TextBlock response
-            response = message.content
-            if isinstance(response, list):
-                # If it's a list of TextBlocks, get the text from the first one
-                if len(response) > 0 and hasattr(response[0], 'text'):
-                    response = response[0].text
-                else:
-                    print("❌ Invalid response format from AI")
-                    return None
+            # Handle TextBlock response if using Claude
+            if 'TextBlock' in response_text:
+                match = re.search(r"text='([^']*)'", response_text)
+                if match:
+                    response_text = match.group(1)
                     
             # Parse response - handle both newline and period-based splits
-            lines = [line.strip() for line in response.split('\n') if line.strip()]
+            lines = [line.strip() for line in response_text.split('\n') if line.strip()]
             if not lines:
                 print("❌ Empty response from AI")
                 return None
@@ -348,7 +380,6 @@ class LiquidationAgent(BaseAgent):
             confidence = 50  # Default confidence
             if len(lines) > 2:
                 try:
-                    import re
                     matches = re.findall(r'(\d+)%', lines[2])
                     if matches:
                         confidence = int(matches[0])
@@ -361,7 +392,8 @@ class LiquidationAgent(BaseAgent):
                 'confidence': confidence,
                 'pct_change': total_pct_change,
                 'pct_change_longs': pct_change_longs,
-                'pct_change_shorts': pct_change_shorts
+                'pct_change_shorts': pct_change_shorts,
+                'model_used': 'deepseek-chat' if self.deepseek_client else self.ai_model
             }
             
         except Exception as e:
@@ -381,10 +413,16 @@ class LiquidationAgent(BaseAgent):
                     liq_type = "SHORT"
                     pct_change = analysis['pct_change_shorts']
                 
+                # Format the percentage change message
+                if pct_change > 0:
+                    change_msg = f"up {abs(pct_change):.1f}%"
+                else:
+                    change_msg = f"down {abs(pct_change):.1f}%"
+                
                 message = (
                     f"ayo moon dev seven seven seven! "
                     f"Massive {liq_type} liquidations detected! "
-                    f"Up {pct_change:.1f}% in the last period! "
+                    f"{change_msg} in the last period! "
                     f"AI suggests {analysis['action']} with {analysis['confidence']}% confidence 🌙"
                 )
                 return message
@@ -471,8 +509,10 @@ class LiquidationAgent(BaseAgent):
                     # Only trigger if we have valid previous data
                     if previous_longs > 0 and previous_shorts > 0:
                         # Check if we have a significant increase in either longs or shorts
-                        if (current_longs > (previous_longs * LIQUIDATION_THRESHOLD) or 
-                            current_shorts > (previous_shorts * LIQUIDATION_THRESHOLD)):
+                        # Adding 1 to threshold so 0.5 means 150% of previous value
+                        threshold = 1 + LIQUIDATION_THRESHOLD
+                        if (current_longs > (previous_longs * threshold) or 
+                            current_shorts > (previous_shorts * threshold)):
                             # Get AI analysis
                             analysis = self._analyze_opportunity(current_longs, current_shorts, 
                                                               previous_longs, previous_shorts)
