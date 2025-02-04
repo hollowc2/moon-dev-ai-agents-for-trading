@@ -50,16 +50,23 @@ from dotenv import load_dotenv
 import openai
 from src import config
 from src import nice_funcs as n
-from nice_funcs import get_data
+from src import nice_funcs_hl as hl
+from src import nice_funcs_cb as cb
 #from src.data.ohlcv_collector import collect_all_tokens
 from datetime import datetime, timedelta
 import time
 from src.config import *
 from src.agents.base_agent import BaseAgent
 import traceback
+import logging
 
 # Load environment variables
 load_dotenv()
+
+# Add to each agent file (chartanalysis_agent.py, risk_agent.py, sentiment_agent.py, copybot_agent.py, trading_agent.py)
+logging.getLogger('coinbase').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING)
 
 class RiskAgent(BaseAgent):
     def __init__(self):
@@ -127,32 +134,48 @@ class RiskAgent(BaseAgent):
             print("💵 Getting USDC balance...")
             try:
                 print(f"🔍 Checking USDC balance for address: {config.USDC_ADDRESS}")
-                usdc_value = n.get_token_balance_usd(config.USDC_ADDRESS)
-                print(f"✅ USDC Value: ${usdc_value:.2f}")
-                total_value += usdc_value
+                # Try each data source in sequence - note cb doesn't have balance function
+                usdc_value = None
+                for func in [n.get_token_balance_usd, hl.get_token_balance_usd]:
+                    try:
+                        usdc_value = func(config.USDC_ADDRESS)
+                        if usdc_value is not None:
+                            break
+                    except Exception:
+                        continue
+                    
+                if usdc_value is not None:
+                    print(f"✅ USDC Value: ${usdc_value:.2f}")
+                    total_value += usdc_value
+                else:
+                    print("❌ Could not get USDC balance from any source")
+                
             except Exception as e:
                 print(f"❌ Error getting USDC balance: {str(e)}")
-                print(f"🔍 Debug info - USDC Address: {config.USDC_ADDRESS}")
                 traceback.print_exc()
-            
+
             # Get balance of each monitored token
-            print("\n📊 Getting monitored token balances...")
-            print(f"🎯 Total tokens to check: {len(config.MONITORED_TOKENS)}")
-            print(f"📝 Token list: {config.MONITORED_TOKENS}")
-            
             for token in config.MONITORED_TOKENS:
-                if token != config.USDC_ADDRESS:  # Skip USDC as we already counted it
+                if token != config.USDC_ADDRESS:
                     try:
                         print(f"\n🪙 Checking token: {token[:8]}...")
-                        token_value = n.get_token_balance_usd(token)
-                        if token_value > 0:
+                        # Try each data source in sequence - note cb doesn't have balance function
+                        token_value = None
+                        for func in [n.get_token_balance_usd, hl.get_token_balance_usd]:
+                            try:
+                                token_value = func(token)
+                                if token_value is not None:
+                                    break
+                            except Exception:
+                                continue
+                            
+                        if token_value is not None and token_value > 0:
                             print(f"💰 Found position worth: ${token_value:.2f}")
                             total_value += token_value
                         else:
                             print("ℹ️ No balance found for this token")
                     except Exception as e:
                         print(f"❌ Error getting balance for {token[:8]}: {str(e)}")
-                        print("🔍 Full error trace:")
                         traceback.print_exc()
             
             print(f"\n💎 Moon Dev's Total Portfolio Value: ${total_value:.2f} 🌙")
@@ -160,7 +183,6 @@ class RiskAgent(BaseAgent):
             
         except Exception as e:
             cprint(f"❌ Error calculating portfolio value: {str(e)}", "white", "on_red")
-            print("🔍 Full error trace:")
             traceback.print_exc()
             return 0.0
 

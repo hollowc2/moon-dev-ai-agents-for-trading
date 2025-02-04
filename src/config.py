@@ -4,37 +4,33 @@ Built with love by Moon Dev 🚀
 """
 
 # 💰 Trading Configuration
-USDC_ADDRESS = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # Never trade or close
-SOL_ADDRESS = "So11111111111111111111111111111111111111111"   # Never trade or close
+USDC_ADDRESS = "USDC-USD"  # Coinbase uses trading pair format
+SOL_ADDRESS = "SOL-USD"    # Coinbase uses trading pair format
 
 # Create a list of addresses to exclude from trading/closing
 EXCLUDED_TOKENS = [USDC_ADDRESS, SOL_ADDRESS]
 
 # Token List for Trading 📋
 MONITORED_TOKENS = [
-    '9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump',    # 🌬️ FART
-    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',    # 💵 USDC
-    'HeLp6NuQkmYB4pYWo2zYs22mESHXPQYzXbB8n4V98jwC',    # 🤖 AI16Z
-    'KENJSUYLASHUMfHyy5o4Hp2FdNqZg1AsUPhfH2kYvEP',   # GRIFFAIN
-    # '8x5VqbHA8D7NkD52uNuS5nnt3PwA3pLD34ymskeSo2Wn',    # 🧠 ZEREBRO
-    # 'Df6yfrKC8kZE3KNkrHERKzAetSxbrWeniQfyJY4Jpump',    # 😎 CHILL GUY
-    # 'ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY',    # 🌙 MOODENG
-    # 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',    # 🐕 WIF
+    'BTC-USD',    # Bitcoin
+    'ETH-USD',    # Ethereum
+    'SOL-USD',    # Solana
+    'AVAX-USD',   # Avalanche
 ]
 
 # Moon Dev's Token Trading List 🚀
 # Each token is carefully selected by Moon Dev for maximum moon potential! 🌙
-tokens_to_trade = MONITORED_TOKENS  # Using the same list for trading
+tokens_to_trade = MONITORED_TOKENS
 
 # Token and wallet settings
-symbol = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
-address = 'BdKfMtKGfzZcFoLYPrtd4JJ39FJ9qPazbwdKg1Pbo9dk' # YOUR WALLET ADDRESS HERE
+symbol = 'BTC-USD'  # Default trading pair
+address = None      # Not needed for Coinbase
 
 # Position sizing 🎯
-usd_size = 25  # Size of position to hold
+usd_size = 10  # Size of position to hold
 max_usd_order_size = 3  # Max order size
-tx_sleep = 30  # Sleep between transactions
-slippage = 199  # Slippage settings
+tx_sleep = 1  # Reduced sleep between transactions for CEX
+slippage = 100  # 1% slippage (100 = 1%)
 
 # Risk Management Settings 🛡️
 CASH_PERCENTAGE = 20  # Minimum % to keep in USDC as safety buffer (0-100)
@@ -63,17 +59,16 @@ MAX_LOSS_PERCENT = 5  # Maximum loss as percentage (e.g., 20 = 20% loss)
 MAX_GAIN_PERCENT = 5  # Maximum gain as percentage (e.g., 50 = 50% gain)
 
 # Transaction settings ⚡
-slippage = 199  # 500 = 5% and 50 = .5% slippage
-PRIORITY_FEE = 100000  # ~0.02 USD at current SOL prices
-orders_per_open = 3  # Multiple orders for better fill rates
+PRIORITY_FEE = None  # Remove as not needed for Coinbase
+orders_per_open = 1  # Single order is typically sufficient for CEX
 
 # Market maker settings 📊
-buy_under = .0946
-sell_over = 1
+buy_under = 0.99  # Buy when price is 1% below target
+sell_over = 1.01  # Sell when price is 1% above target
 
 # Data collection settings 📈
 DAYSBACK_4_DATA = 3
-DATA_TIMEFRAME = '1H'  # 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 8H, 12H, 1D, 3D, 1W, 1M
+DATA_TIMEFRAME = '1h'  # Changed to lowercase to match Coinbase format
 SAVE_OHLCV_DATA = False  # 🌙 Set to True to save data permanently, False will only use temp data during run
 
 # AI Model Settings 🤖
@@ -101,3 +96,53 @@ EXIT_ALL_POSITIONS = False
 DO_NOT_TRADE_LIST = ['777']
 CLOSED_POSITIONS_TXT = '777'
 minimum_trades_in_last_hour = 777
+
+# Logging configuration
+LOGGING_CONFIG = {
+    'version': 1,
+    'disable_existing_loggers': True,  # Disable existing loggers
+    'formatters': {
+        'standard': {
+            'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'WARNING',  # Only show warnings and above
+            'formatter': 'standard',
+            'class': 'logging.StreamHandler',
+        },
+        'file': {
+            'level': 'WARNING',  # Only show warnings and above
+            'formatter': 'standard',
+            'class': 'logging.FileHandler',
+            'filename': 'moondev.log',
+            'mode': 'a',
+        }
+    },
+    'loggers': {
+        '': {  # Root logger
+            'handlers': ['console', 'file'],
+            'level': 'WARNING',
+            'propagate': False
+        },
+        'coinbase': {
+            'handlers': ['console', 'file'],
+            'level': 'WARNING',  # Set Coinbase logging to WARNING only
+            'propagate': False
+        },
+        'urllib3': {
+            'level': 'WARNING',
+            'propagate': False
+        },
+        'requests': {
+            'level': 'WARNING',
+            'propagate': False
+        }
+    }
+}
+
+# Apply logging config
+import logging.config
+logging.config.dictConfig(LOGGING_CONFIG)

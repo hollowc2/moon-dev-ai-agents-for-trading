@@ -402,41 +402,68 @@ def get_data(address, days_back_4_data, timeframe):
 
 
 def fetch_wallet_holdings_og(address):
+    API_KEY = BIRDEYE_API_KEY
 
-    API_KEY = BIRDEYE_API_KEY  # Assume this is your API key; replace it with the actual one
+    # Debug: Print API key (first/last 4 chars only for security)
+    if API_KEY:
+        cprint(f"Using API key: {API_KEY[:4]}...{API_KEY[-4:]}", 'white', 'on_blue')
+    else:
+        cprint("❌ No API key found!", 'white', 'on_red')
+        return pd.DataFrame()
 
     # Initialize an empty DataFrame
     df = pd.DataFrame(columns=['Mint Address', 'Amount', 'USD Value'])
 
     url = f"https://public-api.birdeye.so/v1/wallet/token_list?wallet={address}"
-    headers = {"x-chain": "solana", "X-API-KEY": API_KEY}
-    response = requests.get(url, headers=headers)
+    headers = {
+        "x-chain": "solana", 
+        "X-API-KEY": API_KEY,
+        "Content-Type": "application/json"
+    }
 
-    if response.status_code == 200:
-        json_response = response.json()
+    try:
+        # Debug: Print request details
+        cprint(f"Making request to: {url}", 'white', 'on_blue')
+        
+        response = requests.get(url, headers=headers)
+        
+        # Debug: Print response details
+        cprint(f"Response status code: {response.status_code}", 'white', 'on_blue')
+        cprint(f"Response headers: {response.headers}", 'white', 'on_blue')
+        
+        if response.status_code == 200:
+            json_response = response.json()
+            
+            # Debug: Print raw response
+            cprint("Raw response:", 'white', 'on_blue')
+            print(json_response)
 
-        if 'data' in json_response and 'items' in json_response['data']:
-            df = pd.DataFrame(json_response['data']['items'])
-            df = df[['address', 'uiAmount', 'valueUsd']]
-            df = df.rename(columns={'address': 'Mint Address', 'uiAmount': 'Amount', 'valueUsd': 'USD Value'})
-            df = df.dropna()
-            df = df[df['USD Value'] > 0.05]
+            if 'data' in json_response and 'items' in json_response['data']:
+                df = pd.DataFrame(json_response['data']['items'])
+                if 'address' in df.columns and 'uiAmount' in df.columns and 'valueUsd' in df.columns:
+                    df = df[['address', 'uiAmount', 'valueUsd']]
+                    df = df.rename(columns={'address': 'Mint Address', 'uiAmount': 'Amount', 'valueUsd': 'USD Value'})
+                    df = df.dropna()
+                    df = df[df['USD Value'] > 0.05]
+                else:
+                    cprint(f"Missing expected columns. Available columns: {df.columns.tolist()}", 'white', 'on_red')
+            else:
+                cprint(f"Response structure incorrect. Keys found: {json_response.keys()}", 'white', 'on_red')
+
         else:
-            cprint("No data available in the response.", 'white', 'on_red')
+            cprint(f"Failed to retrieve token list for {address}. Status code: {response.status_code}", 'white', 'on_magenta')
+            cprint(f"Error response: {response.text}", 'white', 'on_red')
 
-    else:
-        cprint(f"Failed to retrieve token list for {address}.", 'white', 'on_magenta')
+    except Exception as e:
+        cprint(f"Exception occurred: {str(e)}", 'white', 'on_red')
+        return df
 
     # Print the DataFrame if it's not empty
     if not df.empty:
+        cprint("\nWallet Holdings:", 'white', 'on_green')
         print(df)
-        # Assuming cprint is a function you have for printing in color
-        cprint(f'** Total USD balance is {df["USD Value"].sum()}', 'white', 'on_green')
-        # Save the filtered DataFrame to a CSV file
-        # TOKEN_PER_ADDY_CSV = 'filtered_wallet_holdings.csv'  # Define your CSV file name
-        # df.to_csv(TOKEN_PER_ADDY_CSV, index=False)
+        cprint(f'Total USD balance: ${df["USD Value"].sum():.2f}', 'white', 'on_green')
     else:
-        # If the DataFrame is empty, print a message or handle it as needed
         cprint("No wallet holdings to display.", 'white', 'on_red')
 
     return df

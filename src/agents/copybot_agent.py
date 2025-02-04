@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 import time
 from src.config import *
 from src import nice_funcs as n
+from src import nice_funcs_hl as hl
+from src import nice_funcs_cb as cb
 
 #from src.data.ohlcv_collector import collect_all_tokens, collect_token_data
 
@@ -105,23 +107,21 @@ class CopyBotAgent:
             print(f"💰 Current Amount: {position_data['Amount'].values[0]}")
             print(f"💵 USD Value: ${position_data['USD Value'].values[0]:.2f}")
                 
-            # Get OHLCV data - Use collect_token_data instead of collect_all_tokens
-            print("\n📊 Fetching OHLCV data...")
-            try:
-                token_market_data = collect_token_data(token)
-                print("\n🔍 OHLCV Data Retrieved:")
-                if token_market_data is None or token_market_data.empty:
-                    print("❌ No OHLCV data found")
-                    token_market_data = "No market data available"
-                else:
-                    print("✅ OHLCV data found:")
-                    print("Shape:", token_market_data.shape)
-                    print("\nFirst few rows:")
-                    print(token_market_data.head())
-                    print("\nColumns:", token_market_data.columns.tolist())
-            except Exception as e:
-                print(f"❌ Error collecting OHLCV data: {str(e)}")
+            # Try each data source for market data
+            token_market_data = None
+            for func in [cb.get_data, n.get_data, hl.get_data]:
+                try:
+                    token_market_data = func(token, timeframe='1h', bars=24)  # Get 24 hours of hourly data
+                    if token_market_data is not None:
+                        break
+                except Exception:
+                    continue
+                
+            if token_market_data is None:
+                print("❌ No market data available from any source")
                 token_market_data = "No market data available"
+            else:
+                print("✅ Market data found")
             
             # Prepare context for LLM
             full_prompt = f"""

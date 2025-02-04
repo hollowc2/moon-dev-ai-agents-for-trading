@@ -18,6 +18,7 @@ import anthropic
 import openai
 from src import nice_funcs as n
 from src import nice_funcs_hl as hl
+from src import nice_funcs_cb as cb
 from src.agents.base_agent import BaseAgent
 import traceback
 import base64
@@ -33,7 +34,7 @@ TIMEFRAMES = ['15m']#['15m', '1h', '4h', '1d']  # Multiple timeframes to analyze
 LOOKBACK_BARS = 100  # Number of candles to analyze
 
 # Trading Pairs to Monitor
-SYMBOLS = ["BTC", "FARTCOIN"]  # Add or modify symbols here
+SYMBOLS = ["BTC", "TOSHI"]  # Add or modify symbols here
 
 # Chart Settings
 CHART_STYLE = 'charles'  # mplfinance style
@@ -310,18 +311,48 @@ class ChartAnalysisAgent(BaseAgent):
     def analyze_symbol(self, symbol, timeframe):
         """Analyze a single symbol on a specific timeframe"""
         try:
-            # Get market data
-            data = hl.get_data(
-                symbol=symbol,
-                timeframe=timeframe,
-                bars=LOOKBACK_BARS,
-                add_indicators=True
-            )
+            # Try getting data from each source
+            data = None
             
+            # Try Coinbase first
+            try:
+                data = cb.get_data(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    bars=LOOKBACK_BARS,
+                    add_indicators=True
+                )
+            except Exception as e:
+                print(f"📝 Coinbase data fetch failed: {str(e)}")
+
+            # If Coinbase fails, try nice_funcs
             if data is None or data.empty:
-                print(f"❌ No data available for {symbol} {timeframe}")
+                try:
+                    data = n.get_data(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        bars=LOOKBACK_BARS,
+                        add_indicators=True
+                    )
+                except Exception as e:
+                    print(f"📝 nice_funcs data fetch failed: {str(e)}")
+
+            # If both fail, try nice_funcs_hl
+            if data is None or data.empty:
+                try:
+                    data = hl.get_data(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        bars=LOOKBACK_BARS,
+                        add_indicators=True
+                    )
+                except Exception as e:
+                    print(f"📝 nice_funcs_hl data fetch failed: {str(e)}")
+
+            if data is None or data.empty:
+                print(f"❌ No data available for {symbol} {timeframe} from any source")
                 return
-                
+
             # Calculate additional indicators
             if 'SMA20' not in data.columns:
                 data['SMA20'] = data['close'].rolling(window=20).mean()

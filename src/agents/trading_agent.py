@@ -70,7 +70,10 @@ import time
 # Local imports
 from src.config import *
 from src import nice_funcs as n
-from src.data.ohlcv_collector import collect_all_tokens
+from src import nice_funcs_hl as hl
+from src import nice_funcs_cb as cb
+#Sfrom src.data.ohlcv_collector import collect_all_tokens
+from nice_funcs import get_data
 
 # Load environment variables
 load_dotenv()
@@ -169,6 +172,19 @@ Strategy Signals Available:
             max_position_size = usd_size * (MAX_POSITION_PERCENTAGE / 100)
             cprint(f"🎯 Maximum position size: ${max_position_size:.2f} ({MAX_POSITION_PERCENTAGE}% of ${usd_size:.2f})", "cyan")
             
+            # Get available products from Coinbase
+            available_products = cb.get_available_products()
+            if not available_products:
+                cprint("❌ Could not get available products from Coinbase", "red")
+                return None
+            
+            # Filter out excluded tokens and stablecoins
+            trading_pairs = [
+                pair for pair in available_products 
+                if pair.endswith('-USD') and 
+                not any(stable in pair for stable in ['USDC', 'USDT', 'DAI', 'UST'])
+            ]
+            
             # Get allocation from AI
             message = self.client.messages.create(
                 model=AI_MODEL,
@@ -182,19 +198,20 @@ Given:
 - Total portfolio size: ${usd_size}
 - Maximum position size: ${max_position_size} ({MAX_POSITION_PERCENTAGE}% of total)
 - Minimum cash (USDC) buffer: {CASH_PERCENTAGE}%
-- Available tokens: {MONITORED_TOKENS}
-- USDC Address: {USDC_ADDRESS}
+- Available trading pairs: {trading_pairs}
+- USDC-USD pair for cash allocation
 
 Provide a portfolio allocation that:
 1. Never exceeds max position size per token
-2. Maintains minimum cash buffer
-3. Returns allocation as a JSON object with token addresses as keys and USD amounts as values
-4. Uses exact USDC address: {USDC_ADDRESS} for cash allocation
+2. Maintains minimum cash buffer in USDC-USD
+3. Returns allocation as a JSON object with trading pairs as keys and USD amounts as values
+4. Uses 'USDC-USD' for cash allocation
 
 Example format:
 {{
-    "token_address": amount_in_usd,
-    "{USDC_ADDRESS}": remaining_cash_amount  # Use exact USDC address
+    "BTC-USD": amount_in_usd,
+    "ETH-USD": amount_in_usd,
+    "USDC-USD": cash_amount
 }}"""
                 }]
             )
@@ -203,24 +220,19 @@ Example format:
             allocations = self.parse_allocation_response(str(message.content))
             if not allocations:
                 return None
-                
-            # Fix USDC address if needed
-            if "USDC_ADDRESS" in allocations:
-                amount = allocations.pop("USDC_ADDRESS")
-                allocations[USDC_ADDRESS] = amount
-                
+            
             # Validate allocation totals
             total_allocated = sum(allocations.values())
             if total_allocated > usd_size:
                 cprint(f"❌ Total allocation ${total_allocated:.2f} exceeds portfolio size ${usd_size:.2f}", "red")
                 return None
-                
+            
             # Print allocations
             cprint("\n📊 Portfolio Allocation:", "green")
             for token, amount in allocations.items():
-                token_display = "USDC" if token == USDC_ADDRESS else token
+                token_display = "USDC" if token == 'USDC-USD' else token
                 cprint(f"  • {token_display}: ${amount:.2f}", "green")
-                
+            
             return allocations
             
         except Exception as e:
@@ -233,7 +245,6 @@ Example format:
             print("\n🚀 Moon Dev executing portfolio allocations...")
             
             for token, amount in allocation_dict.items():
-                # Skip USDC and other excluded tokens
                 if token in EXCLUDED_TOKENS:
                     print(f"💵 Keeping ${amount:.2f} in {token}")
                     continue
@@ -241,22 +252,43 @@ Example format:
                 print(f"\n🎯 Processing allocation for {token}...")
                 
                 try:
-                    # Get current position value
-                    current_position = n.get_token_balance_usd(token)
-                    target_allocation = amount
+                    # Debug which function we're using
+                    print("📊 Attempting to get position from Coinbase...")
+                    current_position = None
                     
+                    try:
+                        current_position = cb.get_token_balance_usd(token)
+                        print(f"✅ Successfully got position from Coinbase: ${current_position:.2f}")
+                    except Exception as cb_error:
+                        print(f"⚠️ Coinbase position check failed: {str(cb_error)}")
+                        continue  # Skip to next token if Coinbase fails
+                    
+                    if current_position is None:
+                        print("❌ Could not get current position from Coinbase")
+                        continue
+                        
+                    target_allocation = amount
                     print(f"🎯 Target allocation: ${target_allocation:.2f} USD")
                     print(f"📊 Current position: ${current_position:.2f} USD")
                     
                     if current_position < target_allocation:
                         print(f"✨ Executing entry for {token}")
-                        n.ai_entry(token, amount)
-                        print(f"✅ Entry complete for {token}")
+                        try:
+                            success = cb.ai_entry(token, amount, max_usd_order_size=50000)
+                            if success:
+                                print(f"✅ Entry successful using Coinbase")
+                            else:
+                                print(f"❌ Entry failed for {token}")
+                        except Exception as entry_error:
+                            print(f"❌ Coinbase entry failed: {str(entry_error)}")
                     else:
                         print(f"⏸️ Position already at target size for {token}")
                     
                 except Exception as e:
                     print(f"❌ Error executing entry for {token}: {str(e)}")
+                    print(f"Full error details: {type(e).__name__}")
+                    import traceback
+                    print(traceback.format_exc())
                 
                 time.sleep(2)  # Small delay between entries
                 
@@ -277,15 +309,25 @@ Example format:
                 
             action = row['action']
             
-            # Check if we have a position
-            current_position = n.get_token_balance_usd(token)
+            # Check if we have a position using Coinbase first
+            try:
+                current_position = cb.get_token_balance_usd(token)
+            except:
+                try:
+                    current_position = n.get_token_balance_usd(token)  # Fallback to nice_funcs
+                except:
+                    current_position = 0
             
             if current_position > 0 and action in ["SELL", "NOTHING"]:
                 cprint(f"\n🚫 AI Agent recommends {action} for {token}", "white", "on_yellow")
                 cprint(f"💰 Current position: ${current_position:.2f}", "white", "on_blue")
                 try:
                     cprint(f"📉 Closing position with chunk_kill...", "white", "on_cyan")
-                    n.chunk_kill(token, max_usd_order_size, slippage)
+                    # Try Coinbase chunk_kill first
+                    try:
+                        cb.chunk_kill(token, max_usd_order_size=50000)
+                    except:
+                        n.chunk_kill(token, max_usd_order_size, slippage)  # Fallback to nice_funcs
                     cprint(f"✅ Successfully closed position", "white", "on_green")
                 except Exception as e:
                     cprint(f"❌ Error closing position: {str(e)}", "white", "on_red")
@@ -361,7 +403,7 @@ Example format:
             # Parse the JSON
             allocations = json.loads(json_str)
             
-            print("📊 Parsed allocations:")
+            print("\n📊 Parsed allocations:")
             for token, amount in allocations.items():
                 print(f"  • {token}: ${amount}")
             
@@ -375,6 +417,64 @@ Example format:
             print(f"❌ Unexpected error parsing allocations: {e}")
             return None
 
+    def get_data_from_sources(self, token, timeframe='1h', bars=24):
+        """Helper function to get data from available sources, prioritizing Coinbase"""
+        data = None
+        
+        # Try Coinbase first using get_historical_data
+        try:
+            # Convert timeframe parameter to granularity for Coinbase
+            granularity = timeframe.replace('m', '').replace('h', '* 60')
+            granularity = eval(granularity)  # Safely convert string to number
+            
+            data = cb.get_historical_data(
+                symbol=token,
+                granularity=granularity,  # Coinbase uses seconds
+                days_back=bars  # Coinbase uses 'limit' instead of 'bars'
+            )
+            if data is not None:
+                print(f"✅ Got data from Coinbase for {token}")
+                return data
+        except Exception as e:
+            print(f"📝 Coinbase data fetch failed: {str(e)}")
+
+        # Try other sources if Coinbase fails
+        for module in [n, hl]:  # Add any new nice_funcs modules here
+            try:
+                data = module.get_data(token, timeframe=timeframe, bars=bars)
+                if data is not None:
+                    print(f"✅ Got data from alternate source for {token}")
+                    return data
+            except Exception:
+                continue
+            
+        return data
+
+    def get_products_from_sources(self):
+        """Helper function to get available products, prioritizing Coinbase"""
+        products = None
+        
+        # Try Coinbase first
+        try:
+            products = cb.get_available_products()
+            if products:
+                print("✅ Got products from Coinbase")
+                return products
+        except Exception as e:
+            print(f"📝 Coinbase products fetch failed: {str(e)}")
+
+        # Try other sources if Coinbase fails
+        for module in [n, hl]:  # Add any new nice_funcs modules here
+            try:
+                products = module.get_available_products()
+                if products:
+                    print(f"✅ Got products from alternate source")
+                    return products
+            except Exception:
+                continue
+            
+        return products
+
     def run(self):
         """Run the trading agent (implements BaseAgent interface)"""
         self.run_trading_cycle()
@@ -385,9 +485,25 @@ Example format:
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cprint(f"\n⏰ AI Agent Run Starting at {current_time}", "white", "on_green")
             
-            # Collect OHLCV data for all tokens
-            cprint("📊 Collecting market data...", "white", "on_blue")
-            market_data = collect_all_tokens()
+            # Get available products
+            cprint("📊 Getting available products...", "white", "on_blue")
+            products = self.get_products_from_sources()
+            
+            if not products:
+                raise Exception("Could not get products from any source")
+            
+            # Collect market data
+            market_data = {}
+            for token in products:
+                if token in EXCLUDED_TOKENS:
+                    continue
+                    
+                data = self.get_data_from_sources(token)
+                if data is not None:
+                    market_data[token] = data
+            
+            if not market_data:
+                raise Exception("Could not get market data from any source")
             
             # Analyze each token's data
             for token, data in market_data.items():

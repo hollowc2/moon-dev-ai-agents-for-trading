@@ -44,6 +44,9 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import numpy as np
 import openai
 from pathlib import Path
+from src import nice_funcs as n
+from src import nice_funcs_hl as hl
+from src import nice_funcs_cb as cb
 
 # Create data directory if it doesn't exist
 pathlib.Path(DATA_FOLDER).mkdir(parents=True, exist_ok=True)
@@ -192,8 +195,9 @@ class SentimentAgent:
     def save_sentiment_score(self, sentiment_score, num_tweets):
         """Save sentiment score to history"""
         try:
+            # Create new data with consistent timestamp format
             new_data = pd.DataFrame([{
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
                 'sentiment_score': sentiment_score,
                 'num_tweets': num_tweets
             }])
@@ -206,8 +210,6 @@ class SentimentAgent:
                 # Keep only last 24 hours of data
                 cutoff_time = datetime.now() - timedelta(hours=24)
                 history_df = history_df[history_df['timestamp'] > cutoff_time]
-                # Convert back to ISO format for consistent storage
-                history_df['timestamp'] = history_df['timestamp'].dt.isoformat()
                 # Append new data
                 history_df = pd.concat([history_df, new_data], ignore_index=True)
             else:
@@ -228,8 +230,8 @@ class SentimentAgent:
             if len(history_df) < 2:
                 return None, None
                 
-            # Convert timestamps using ISO format
-            history_df['timestamp'] = pd.to_datetime(history_df['timestamp'], format='ISO8601')
+            # Convert timestamps consistently
+            history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
             history_df = history_df.sort_values('timestamp')
             
             current_score = float(history_df.iloc[-1]['sentiment_score'])
@@ -491,6 +493,38 @@ class SentimentAgent:
     def run(self):
         """Main function to run sentiment analysis"""
         asyncio.run(self.run_async())
+
+    def get_position_data(self, token):
+        """Get recent market data for a token"""
+        try:
+            data_15m = None
+            data_5m = None
+            
+            # Try each data source for 15m data
+            for func in [cb.get_data, n.get_data, hl.get_data]:
+                try:
+                    data_15m = func(token, 0.33, '15m')  # 8 hours = 0.33 days
+                    if data_15m is not None:
+                        break
+                except Exception:
+                    continue
+                    
+            # Try each data source for 5m data
+            for func in [cb.get_data, n.get_data, hl.get_data]:
+                try:
+                    data_5m = func(token, 0.083, '5m')   # 2 hours = 0.083 days
+                    if data_5m is not None:
+                        break
+                except Exception:
+                    continue
+                    
+            return {
+                '15m': data_15m.to_dict() if data_15m is not None else None,
+                '5m': data_5m.to_dict() if data_5m is not None else None
+            }
+        except Exception as e:
+            cprint(f"❌ Error getting data for {token}: {str(e)}", "white", "on_red")
+            return None
 
 if __name__ == "__main__":
     try:
