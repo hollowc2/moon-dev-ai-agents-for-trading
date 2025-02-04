@@ -21,7 +21,7 @@ import math
 
 # Text Input Settings
 USE_TEXT_FILE = True  # Whether to use input text file by default
-INPUT_TEXT_FILE = "/Users/md/Dropbox/dev/github/moon-dev-ai-agents-for-trading/src/data/tweets/generated_tweets_20250127_090040.txt"
+INPUT_TEXT_FILE = "/Users/md/Dropbox/dev/github/moon-dev-ai-agents-for-trading/src/data/tweets/generated_tweets_20250127_092231.txt"
 
 # Processing Settings
 PLAY_AUDIO = False  # Whether to play audio after generation (slower if True)
@@ -124,6 +124,7 @@ class VideoAgent:
         output_file = self.final_vids_dir / f"{video_name}.mp4"
         
         try:
+
             # Get video duration
             cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 
                   'default=noprint_wrappers=1:nokey=1', str(video_file)]

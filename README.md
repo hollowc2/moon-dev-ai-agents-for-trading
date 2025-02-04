@@ -83,29 +83,19 @@ Project updates will be posted in discord, join here: [moondev.com](http://moond
 - twitter agent (`tweet_agent.py`): takes in text and creates tweets using deepseek or other models
 - video agent (`video_agent.py`): takes in text to create videos by creating audio snippets using elevenlabs and combining with raw_video footage
 - new or top tokens (`new_or_top_agent.py`): an agent that looks at the new tokens and the top tokens from coin gecko api
+- chat agent (`chat_agent`): an agent that monitors youtube live stream chat, moderates & responds to known questions. absolute fire.
 
-## 🚀 Project Progress & Roadmap
-### Phase 1: Foundation & Basic Trading ✅
-- [x] Basic project structure
-- [x] Environment setup
-- [x] Token data collection
-- [x] Basic trading functions
-- [x] Market data API integration (OI, Liquidations, Funding)
-- [x] Risk management agent with PnL limits
-- [x] Risk agent minimum balance protection (1/8/25)
-- [x] CopyBot portfolio analyzer (1/8/25)
-- [x] Comprehensive API access for Quantalete members (1/15/25)
-
-### Phase 2: Advanced Features 🚀
-- [ ] Portfolio optimization
-- [ ] Advanced risk management
-- [ ] Machine learning integration
-- [x] Sentiment analysis with voice announcements
-- [ ] Backtesting framework
-- [ ] Performance analytics
 
 ### Shipped Features 📦
 
+- [x] 2/4 - code running agent is complete and put in the agents folder
+- [x] 2/3 - self executing now works, game changer
+- [x] 2/1 - working on getting a self executing ai agent to work with a debugger ai to be able to autonomosly improve my code and trading backtests
+- [x] 1/31 - added o3-mini to the model factory
+- [x] 1/31 - updated the chat agent, this is the agent i will use for all live streams to manage chat with ai
+- [x] 1/30 - created the chat agent to manage the live stream chat
+- [x] 1/30 - groq added & gemini added. new interface for handling the ever growing amount of ai's we have access to. src/models/README.md
+- [x] 1/29 - deepseek hosted locally on lambda labs, see the api script if you want to launch your own src/scripts/deepseek_api.py. how to call it src/scripts/deepseek_local_call.py
 - [x] 1/27 - built a tweet agent and video agent 
 - [x] 1/23 - build an rbi agent that codes backtests based on trading strategy videos, pdfs or words
 - [x] 1/20 - built the funding rate arbitrage trading agent to annnounce when there is a funding rate arbitrage between hyperliquid tokens and spot solana tokens. later we can update this to place the trades
