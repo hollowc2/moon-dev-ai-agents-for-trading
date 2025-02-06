@@ -1,11 +1,11 @@
 """
-🌙 Moon Dev's LLM Trading Agent
-Handles all LLM-based trading decisions
+🌙 Billy Bitcoin's Trading Agent
+Coordinates strategy signals and executes trades
 """
 
 # Keep only these prompts
 TRADING_PROMPT = """
-You are Moon Dev's AI Trading Assistant 🌙
+You are Billy Bitcoin's AI Trading Assistant 🌙
 
 Analyze the provided market data and strategy signals (if available) to make a trading decision.
 
@@ -27,13 +27,13 @@ Respond in this exact format:
    - Confidence level (as a percentage, e.g. 75%)
 
 Remember: 
-- Moon Dev always prioritizes risk management! 🛡️
+- Billy Bitcoin always prioritizes risk management! 🛡️
 - Never trade USDC or SOL directly
 - Consider both technical and strategy signals
 """
 
 ALLOCATION_PROMPT = """
-You are Moon Dev's Portfolio Allocation Assistant 🌙
+You are Billy Bitcoin's Portfolio Allocation Assistant 🌙
 
 Given the total portfolio size and trading recommendations, allocate capital efficiently.
 Consider:
@@ -69,22 +69,84 @@ import time
 
 # Local imports
 from src.config import *
-from src import nice_funcs as n
-from src import nice_funcs_hl as hl
+from src import config
 from src import nice_funcs_cb as cb
 #Sfrom src.data.ohlcv_collector import collect_all_tokens
 from nice_funcs import get_data
+from src.agents.base_agent import BaseAgent
+from src.agents.chartanalysis_agent import ChartAnalysisAgent
+from src.agents.strategy_agent import StrategyAgent
 
 # Load environment variables
 load_dotenv()
 
-class TradingAgent:
-    def __init__(self):
-        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
-        self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence', 'reasoning'])
-        print("🤖 Moon Dev's LLM Trading Agent initialized!")
+# Add at top of file with other constants
+VALID_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
+DEFAULT_TIMEFRAME = '15m'
+DEFAULT_BARS = 24
 
-    def analyze_market_data(self, token, market_data):
+class TradingAgent(BaseAgent):
+    def __init__(self):
+        """Initialize the Trading Agent"""
+        super().__init__(agent_type='trading')
+        
+        # Get available trading pairs from Coinbase first
+        self.symbols = self._get_trading_pairs()
+        
+        # Initialize other agents
+        self.chart_agent = ChartAnalysisAgent(symbols=self.symbols)  # Pass symbols to chart agent
+        self.strategy_agent = StrategyAgent()
+        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+        
+        # Get initial portfolio state from Coinbase
+        self.portfolio = self.get_portfolio_state()
+        
+        self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence', 'reasoning'])
+        self.strategy_signals = {}  # Initialize empty strategy signals dict
+        print("🤖 Billy Bitcoin's LLM Trading Agent initialized!")
+
+    def _get_trading_pairs(self):
+        """Get top trading pairs from Coinbase by volume"""
+        try:
+            # Use existing function from nice_funcs_cb
+            products = cb.get_available_products()
+            
+            if not products:
+                print("⚠️ No pairs found, defaulting to BTC-USD")
+                return ["BTC-USD"]
+            
+            # Print pairs for visibility
+            print("\n📊 Available USD trading pairs:")
+            for pair in products[:2]:  # Show first 2 pairs
+                print(f"🪙 {pair}")
+            
+            return products[:2]  # Return top pairs
+            
+        except Exception as e:
+            print(f"❌ Error getting trading pairs: {str(e)}")
+            print("⚠️ Defaulting to BTC-USD")
+            return ["BTC-USD"]
+
+    def get_portfolio_state(self):
+        """Get current portfolio state from Coinbase"""
+        try:
+            # Get USD balance
+            usd_balance = cb.get_usd_balance()
+            portfolio = {'USDC-USD': usd_balance}
+            
+            # Get other token balances
+            for token in self.symbols:
+                if token != 'USDC-USD':
+                    balance = cb.get_token_balance_usd(token)
+                    if balance > 0:
+                        portfolio[token] = balance
+            
+            return portfolio
+        except Exception as e:
+            print(f"❌ Error getting portfolio state: {e}")
+            return {}
+
+    def analyze_market_data(self, token, market_data, strategy_signals=None):
         """Analyze market data using Claude"""
         try:
             # Skip analysis for excluded tokens
@@ -92,12 +154,17 @@ class TradingAgent:
                 print(f"⚠️ Skipping analysis for excluded token: {token}")
                 return None
             
+            # Check if strategy signals are required
+            if config.REQUIRE_STRATEGY_SIGNALS and not strategy_signals:
+                print(f"⏭️ Skipping {token} - No strategy signals available and REQUIRE_STRATEGY_SIGNALS=True")
+                return None
+            
             # Prepare strategy context
             strategy_context = ""
-            if 'strategy_signals' in market_data:
+            if strategy_signals and token in strategy_signals:
                 strategy_context = f"""
 Strategy Signals Available:
-{json.dumps(market_data['strategy_signals'], indent=2)}
+{json.dumps(strategy_signals[token], indent=2)}
                 """
             else:
                 strategy_context = "No strategy signals available."
@@ -148,7 +215,7 @@ Strategy Signals Available:
                 }])
             ], ignore_index=True)
             
-            print(f"🎯 Moon Dev's AI Analysis Complete for {token[:4]}!")
+            print(f"🎯 Billy Bitcoin's AI Analysis Complete for {token[:4]}!")
             return response
             
         except Exception as e:
@@ -172,16 +239,26 @@ Strategy Signals Available:
             max_position_size = usd_size * (MAX_POSITION_PERCENTAGE / 100)
             cprint(f"🎯 Maximum position size: ${max_position_size:.2f} ({MAX_POSITION_PERCENTAGE}% of ${usd_size:.2f})", "cyan")
             
+            # Filter for BUY recommendations only
+            buy_recommendations = self.recommendations_df[
+                self.recommendations_df['action'] == "BUY"
+            ]['token'].tolist()
+            
+            if not buy_recommendations:
+                cprint("ℹ️ No BUY recommendations found - keeping funds in USDC", "yellow")
+                return {"USDC-USD": usd_size}
+            
             # Get available products from Coinbase
             available_products = cb.get_available_products()
             if not available_products:
                 cprint("❌ Could not get available products from Coinbase", "red")
                 return None
             
-            # Filter out excluded tokens and stablecoins
+            # Filter trading pairs to only include BUY recommendations
             trading_pairs = [
                 pair for pair in available_products 
-                if pair.endswith('-USD') and 
+                if pair in buy_recommendations and
+                pair.endswith('-USD') and 
                 not any(stable in pair for stable in ['USDC', 'USDT', 'DAI', 'UST'])
             ]
             
@@ -192,7 +269,7 @@ Strategy Signals Available:
                 temperature=AI_TEMPERATURE,
                 messages=[{
                     "role": "user", 
-                    "content": f"""You are Moon Dev's Portfolio Allocation AI 🌙
+                    "content": f"""You are Billy Bitcoin's Portfolio Allocation AI 🌙
 
 Given:
 - Total portfolio size: ${usd_size}
@@ -203,9 +280,9 @@ Given:
 
 Provide a portfolio allocation that:
 1. Never exceeds max position size per token
-2. Maintains minimum cash buffer in USDC-USD
+2. Maintains minimum cash buffer in USD 
 3. Returns allocation as a JSON object with trading pairs as keys and USD amounts as values
-4. Uses 'USDC-USD' for cash allocation
+4. Uses 'USD' for cash allocation
 
 Example format:
 {{
@@ -242,9 +319,20 @@ Example format:
     def execute_allocations(self, allocation_dict):
         """Execute the allocations using AI entry for each position"""
         try:
-            print("\n🚀 Moon Dev executing portfolio allocations...")
+            print("\n🚀 Billy Bitcoin executing portfolio allocations...")
             
             for token, amount in allocation_dict.items():
+                # Check recommendation before proceeding
+                token_recommendation = self.recommendations_df[
+                    self.recommendations_df['token'] == token
+                ]
+                
+                if not token_recommendation.empty:
+                    action = token_recommendation.iloc[0]['action']
+                    if action != "BUY":
+                        print(f"⏭️ Skipping {token} - AI recommends {action}, not BUY")
+                        continue
+                
                 if token in EXCLUDED_TOKENS:
                     print(f"💵 Keeping ${amount:.2f} in {token}")
                     continue
@@ -252,7 +340,6 @@ Example format:
                 print(f"\n🎯 Processing allocation for {token}...")
                 
                 try:
-                    # Debug which function we're using
                     print("📊 Attempting to get position from Coinbase...")
                     current_position = None
                     
@@ -261,7 +348,7 @@ Example format:
                         print(f"✅ Successfully got position from Coinbase: ${current_position:.2f}")
                     except Exception as cb_error:
                         print(f"⚠️ Coinbase position check failed: {str(cb_error)}")
-                        continue  # Skip to next token if Coinbase fails
+                        continue
                     
                     if current_position is None:
                         print("❌ Could not get current position from Coinbase")
@@ -274,27 +361,46 @@ Example format:
                     if current_position < target_allocation:
                         print(f"✨ Executing entry for {token}")
                         try:
-                            success = cb.ai_entry(token, amount, max_usd_order_size=50000)
+                            available_usd = cb.get_usd_balance()
+                            entry_amount = target_allocation - current_position
+                            
+                            if available_usd < entry_amount:
+                                print(f"❌ Insufficient USD balance (${available_usd:.2f}) for entry (${entry_amount:.2f})")
+                                continue
+                                
+                            # Simple market order for smaller amounts
+                            if entry_amount <= 10000:
+                                print(f"📈 Placing single market order for ${entry_amount:.2f}")
+                                success = cb.market_buy(token, entry_amount)
+                            else:
+                                print(f"📈 Placing chunked order for ${entry_amount:.2f}")
+                                # Pass max_usd_order_size from config
+                                success = cb.ai_entry(token, entry_amount, max_usd_order_size=config.max_usd_order_size)
+                                
                             if success:
-                                print(f"✅ Entry successful using Coinbase")
+                                print(f"✅ Entry successful for {token}")
                             else:
                                 print(f"❌ Entry failed for {token}")
+                                
                         except Exception as entry_error:
-                            print(f"❌ Coinbase entry failed: {str(entry_error)}")
+                            if "INSUFFICIENT_FUND" in str(entry_error):
+                                print(f"❌ Insufficient funds for {token} entry - skipping")
+                            else:
+                                print(f"❌ Entry error: {str(entry_error)}")
+                            continue
                     else:
                         print(f"⏸️ Position already at target size for {token}")
-                    
+
                 except Exception as e:
                     print(f"❌ Error executing entry for {token}: {str(e)}")
                     print(f"Full error details: {type(e).__name__}")
-                    import traceback
-                    print(traceback.format_exc())
+                    continue  # Skip to next token on error
                 
                 time.sleep(2)  # Small delay between entries
                 
         except Exception as e:
             print(f"❌ Error executing allocations: {str(e)}")
-            print("🔧 Moon Dev suggests checking the logs and trying again!")
+            print("🔧 Billy Bitcoin suggests checking the logs and trying again!")
 
     def handle_exits(self):
         """Check and exit positions based on SELL or NOTHING recommendations"""
@@ -303,36 +409,68 @@ Example format:
         for _, row in self.recommendations_df.iterrows():
             token = row['token']
             
-            # Skip excluded tokens (USDC and SOL)
             if token in EXCLUDED_TOKENS:
                 continue
                 
             action = row['action']
             
-            # Check if we have a position using Coinbase first
             try:
-                current_position = cb.get_token_balance_usd(token)
-            except:
-                try:
-                    current_position = n.get_token_balance_usd(token)  # Fallback to nice_funcs
-                except:
-                    current_position = 0
-            
-            if current_position > 0 and action in ["SELL", "NOTHING"]:
-                cprint(f"\n🚫 AI Agent recommends {action} for {token}", "white", "on_yellow")
-                cprint(f"💰 Current position: ${current_position:.2f}", "white", "on_blue")
-                try:
-                    cprint(f"📉 Closing position with chunk_kill...", "white", "on_cyan")
-                    # Try Coinbase chunk_kill first
+                # Get position details
+                current_position_usd = cb.get_token_balance_usd(token)
+                if current_position_usd <= 0:
+                    continue
+
+                if action in ["SELL", "NOTHING"]:
+                    cprint(f"\n🚫 AI Agent recommends {action} for {token}", "white", "on_yellow")
+                    cprint(f"💰 Current position: ${current_position_usd:.2f}", "white", "on_blue")
+                    
                     try:
-                        cb.chunk_kill(token, max_usd_order_size=50000)
-                    except:
-                        n.chunk_kill(token, max_usd_order_size, slippage)  # Fallback to nice_funcs
-                    cprint(f"✅ Successfully closed position", "white", "on_green")
-                except Exception as e:
-                    cprint(f"❌ Error closing position: {str(e)}", "white", "on_red")
-            elif current_position > 0:
-                cprint(f"✨ Keeping position for {token} (${current_position:.2f}) - AI recommends {action}", "white", "on_blue")
+                        cprint(f"📉 Attempting to close position...", "white", "on_cyan")
+                        
+                        # Get current price to calculate base amount
+                        current_price = cb.get_product_price(token)
+                        if current_price <= 0:
+                            cprint(f"❌ Could not get current price for {token}", "white", "on_red")
+                            continue
+                            
+                        # Calculate base amount (token amount) with extra precision
+                        base_amount = current_position_usd / current_price
+                        cprint(f"📊 Selling {base_amount:.8f} {token} @ ${current_price:.8f}", "white", "on_blue")
+                        
+                        # Execute market sell using base amount
+                        if current_position_usd <= 10000:
+                            # Use sell_token_amount instead of market_sell
+                            success = cb.sell_token_amount(token, base_amount)
+                        else:
+                            success = cb.chunk_kill(token, max_usd_order_size=50000)
+                        
+                        # Verify the position was closed
+                        time.sleep(3)  # Increased wait time
+                        new_position = cb.get_token_balance_usd(token)
+                        
+                        if new_position <= 0.01:  # Allow for dust
+                            cprint(f"✅ Position successfully closed for {token}", "white", "on_green")
+                        else:
+                            cprint(f"⚠️ Position may not be fully closed. Remaining balance: ${new_position:.2f}", "white", "on_yellow")
+                            # Attempt one more time if partial fill
+                            if new_position > 0.01:
+                                cprint(f"🔄 Attempting to close remaining position...", "white", "on_cyan")
+                                # Recalculate base amount for remaining position
+                                remaining_base = new_position / cb.get_product_price(token)
+                                success = cb.sell_token_amount(token, remaining_base)
+                                time.sleep(3)
+                                final_position = cb.get_token_balance_usd(token)
+                                if final_position <= 0.01:
+                                    cprint(f"✅ Remaining position closed successfully", "white", "on_green")
+                                else:
+                                    cprint(f"❌ Could not fully close position. Final balance: ${final_position:.2f}", "white", "on_red")
+                                    
+                    except Exception as e:
+                        cprint(f"❌ Error closing position: {str(e)}", "white", "on_red")
+                        cprint(f"Full error details: {type(e).__name__}", "white", "on_red")
+            except Exception as e:
+                cprint(f"❌ Error checking position for {token}: {str(e)}", "white", "on_red")
+                continue
 
     def parse_allocation_response(self, response):
         """Parse the AI's allocation response and handle both string and TextBlock formats"""
@@ -417,29 +555,46 @@ Example format:
             print(f"❌ Unexpected error parsing allocations: {e}")
             return None
 
-    def get_data_from_sources(self, token, timeframe='1h', bars=24):
-        """Helper function to get data from available sources, prioritizing Coinbase"""
+    def get_data_from_sources(self, token, timeframe=DEFAULT_TIMEFRAME, bars=DEFAULT_BARS):
+        """Helper function to get data from available sources, prioritizing Coinbase
+        
+        Args:
+            token (str): Trading pair symbol
+            timeframe (str): Candle timeframe ('1m', '5m', '15m', '1h', '4h', '1d')
+            bars (int): Number of candles to fetch
+        """
+        if timeframe not in VALID_TIMEFRAMES:
+            raise ValueError(f"Invalid timeframe. Must be one of: {VALID_TIMEFRAMES}")
+        
         data = None
         
         # Try Coinbase first using get_historical_data
         try:
-            # Convert timeframe parameter to granularity for Coinbase
-            granularity = timeframe.replace('m', '').replace('h', '* 60')
-            granularity = eval(granularity)  # Safely convert string to number
+            # Convert timeframe to seconds for Coinbase
+            granularity_map = {
+                '1m': 60,
+                '5m': 300,
+                '15m': 900,
+                '1h': 3600,
+                '4h': 14400,
+                '1d': 86400
+            }
+            
+            granularity = granularity_map[timeframe]
             
             data = cb.get_historical_data(
                 symbol=token,
-                granularity=granularity,  # Coinbase uses seconds
+                granularity=granularity,  # Now using proper granularity mapping
                 days_back=bars  # Coinbase uses 'limit' instead of 'bars'
             )
             if data is not None:
-                print(f"✅ Got data from Coinbase for {token}")
+                print(f"✅ Got data from Coinbase for {token} using {timeframe} timeframe")
                 return data
         except Exception as e:
             print(f"📝 Coinbase data fetch failed: {str(e)}")
 
         # Try other sources if Coinbase fails
-        for module in [n, hl]:  # Add any new nice_funcs modules here
+        for module in [cb]:  # Add any new nice_funcs modules here
             try:
                 data = module.get_data(token, timeframe=timeframe, bars=bars)
                 if data is not None:
@@ -464,7 +619,7 @@ Example format:
             print(f"📝 Coinbase products fetch failed: {str(e)}")
 
         # Try other sources if Coinbase fails
-        for module in [n, hl]:  # Add any new nice_funcs modules here
+        for module in [cb]:  # Add any new nice_funcs modules here
             try:
                 products = module.get_available_products()
                 if products:
@@ -479,85 +634,92 @@ Example format:
         """Run the trading agent (implements BaseAgent interface)"""
         self.run_trading_cycle()
 
-    def run_trading_cycle(self, strategy_signals=None):
-        """Run one complete trading cycle"""
+    def run_trading_cycle(self):
+        """Run one trading cycle"""
         try:
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cprint(f"\n⏰ AI Agent Run Starting at {current_time}", "white", "on_green")
+            # 1. Get strategy signals
+            signals = {}
+            for token in self.symbols:
+                token_signals = self.strategy_agent.get_signals(token)
+                if token_signals:
+                    signals[token] = token_signals
             
-            # Get available products
-            cprint("📊 Getting available products...", "white", "on_blue")
-            products = self.get_products_from_sources()
+            # 2. Get chart analysis signals (now with proper error handling)
+            chart_signals = self.chart_agent.run_monitoring_cycle() or {}
             
-            if not products:
-                raise Exception("Could not get products from any source")
-            
-            # Collect market data
-            market_data = {}
-            for token in products:
+            # 3. Combine signals and execute trades
+            for token in self.symbols:
+                # Skip excluded tokens
                 if token in EXCLUDED_TOKENS:
                     continue
                     
-                data = self.get_data_from_sources(token)
-                if data is not None:
-                    market_data[token] = data
-            
-            if not market_data:
-                raise Exception("Could not get market data from any source")
-            
-            # Analyze each token's data
-            for token, data in market_data.items():
-                cprint(f"\n🤖 AI Agent Analyzing Token: {token}", "white", "on_green")
+                # Combine signals from both sources
+                token_signals = signals.get(token, [])
+                token_chart = chart_signals.get(token, {})
                 
-                # Include strategy signals in analysis if available
-                if strategy_signals and token in strategy_signals:
-                    cprint(f"📊 Including {len(strategy_signals[token])} strategy signals in analysis", "cyan")
-                    data['strategy_signals'] = strategy_signals[token]
-                
-                analysis = self.analyze_market_data(token, data)
-                print(f"\n📈 Analysis for contract: {token}")
-                print(analysis)
-                print("\n" + "="*50 + "\n")
+                # If we have signals to act on
+                if token_signals or any(chart.get('action') in ['BUY', 'SELL'] 
+                                      for chart in token_chart.values()):
+                    if token_signals:
+                        # Execute strategy-based trades
+                        self.execute_strategy_signals(token_signals)
+                    elif any(chart.get('action') == 'SELL' for chart in token_chart.values()):
+                        # Handle exits based on chart analysis
+                        self.handle_exit(token)
+                        
+        except Exception as e:
+            print(f"❌ Error in trading cycle: {str(e)}")
+
+    def execute_strategy_signals(self, signals):
+        """Execute trades based on strategy signals"""
+        for signal in signals:
+            token = signal['token']
+            direction = signal['direction']
+            target_size = self.calculate_position_size(signal)
             
-            # Show recommendations summary
-            cprint("\n📊 Moon Dev's Trading Recommendations:", "white", "on_blue")
-            summary_df = self.recommendations_df[['token', 'action', 'confidence']].copy()
-            print(summary_df.to_string(index=False))
+            if direction == 'BUY':
+                cb.ai_entry(token, target_size)
+            elif direction == 'SELL':
+                cb.chunk_kill(token, max_usd_order_size, slippage)
+
+    def handle_exit(self, token):
+        """Handle position exit"""
+        try:
+            current_position = cb.get_token_balance_usd(token)
+            if current_position > 0:
+                cb.chunk_kill(token, max_usd_order_size, slippage)
+        except Exception as e:
+            print(f"❌ Error exiting position: {str(e)}")
+
+    def calculate_position_size(self, signal):
+        """Calculate position size based on signal strength and portfolio size"""
+        try:
+            # Get signal confidence
+            confidence = signal.get('confidence', 0)
+            if isinstance(confidence, str):
+                confidence = float(confidence.strip('%'))
+            confidence = float(confidence) / 100  # Convert to decimal
             
-            # Handle exits first
-            self.handle_exits()
+            # Calculate maximum position size based on portfolio
+            max_position = usd_size * (MAX_POSITION_PERCENTAGE / 100)
             
-            # Then proceed with new allocations
-            cprint("\n💰 Calculating optimal portfolio allocation...", "white", "on_blue")
-            allocation = self.allocate_portfolio()
+            # Scale position size by confidence
+            position_size = max_position * confidence
             
-            if allocation:
-                cprint("\n💼 Moon Dev's Portfolio Allocation:", "white", "on_blue")
-                print(json.dumps(allocation, indent=4))
-                
-                cprint("\n🎯 Executing allocations...", "white", "on_blue")
-                self.execute_allocations(allocation)
-                cprint("\n✨ All allocations executed!", "white", "on_blue")
-            else:
-                cprint("\n⚠️ No allocations to execute!", "white", "on_yellow")
+            # Ensure minimum position size
+            MIN_POSITION_SIZE = 10  # $10 minimum
+            if position_size < MIN_POSITION_SIZE:
+                return 0
             
-            # Clean up temp data
-            cprint("\n🧹 Cleaning up temporary data...", "white", "on_blue")
-            try:
-                for file in os.listdir('temp_data'):
-                    if file.endswith('_latest.csv'):
-                        os.remove(os.path.join('temp_data', file))
-                cprint("✨ Temp data cleaned successfully!", "white", "on_green")
-            except Exception as e:
-                cprint(f"⚠️ Error cleaning temp data: {str(e)}", "white", "on_yellow")
+            return position_size
             
         except Exception as e:
-            cprint(f"\n❌ Error in trading cycle: {str(e)}", "white", "on_red")
-            cprint("🔧 Moon Dev suggests checking the logs and trying again!", "white", "on_blue")
+            print(f"❌ Error calculating position size: {str(e)}")
+            return 0
 
 def main():
     """Main function to run the trading agent every 15 minutes"""
-    cprint("🌙 Moon Dev AI Trading System Starting Up! 🚀", "white", "on_blue")
+    cprint("🌙 Billy Bitcoin AI Trading System Starting Up! 🚀", "white", "on_blue")
     
     agent = TradingAgent()
     INTERVAL = SLEEP_BETWEEN_RUNS_MINUTES * 60  # Convert minutes to seconds
@@ -573,11 +735,11 @@ def main():
             time.sleep(INTERVAL)
                 
         except KeyboardInterrupt:
-            cprint("\n👋 Moon Dev AI Agent shutting down gracefully...", "white", "on_blue")
+            cprint("\n👋 Billy Bitcoin AI Agent shutting down gracefully...", "white", "on_blue")
             break
         except Exception as e:
             cprint(f"\n❌ Error: {str(e)}", "white", "on_red")
-            cprint("🔧 Moon Dev suggests checking the logs and trying again!", "white", "on_blue")
+            cprint("🔧 Billy Bitcoin suggests checking the logs and trying again!", "white", "on_blue")
             # Still sleep and continue on error
             time.sleep(INTERVAL)
 

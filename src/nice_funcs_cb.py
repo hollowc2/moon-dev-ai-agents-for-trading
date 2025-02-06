@@ -1,9 +1,11 @@
 """
-🌙 Moon Dev's Nice Functions - Coinbase Edition
-Built with love by Moon Dev 🚀
+🌙 Billy Bitcoin's Nice Functions - Coinbase Edition
+Built with love by Billy Bitcoin 🚀
 """
 
 import logging
+import decimal
+import uuid
 
 # Disable all Coinbase-related logging
 logging.getLogger('coinbase').setLevel(logging.WARNING)
@@ -34,30 +36,16 @@ import requests
 
 load_dotenv(override=True)
 
-def init_client():
-    """Initialize REST client with proper error handling"""
-    try:
-        api_key = os.getenv("COINBASE_API_KEY")
-        private_key = os.getenv('COINBASE_API_SECRET').replace('\\n', '\n')
-        client = RESTClient(
-            api_key=api_key,
-            api_secret=private_key,
-            verbose=True
-        )
-        
-        # Test the connection
-        _ = client.get_accounts()
-        return client
-        
-    except Exception as e:
-        print(f"Failed to initialize client: {str(e)}")
-        raise
-
-# Initialize the client
+# Initialize the client quietly without debug output
 try:
-    rest_client = init_client()
+    api_key = os.getenv("COINBASE_API_KEY")
+    private_key = os.getenv('COINBASE_API_SECRET').replace('\\n', '\n')
+    rest_client = RESTClient(
+        api_key=api_key,
+        api_secret=private_key,
+        verbose=False  # Set to False to disable debug output
+    )
 except Exception as e:
-    print(f"❌ Failed to initialize Coinbase client: {str(e)}")
     rest_client = None
 
 # Base URLs - Updated according to documentation
@@ -69,7 +57,7 @@ os.makedirs('temp_data', exist_ok=True)
 
 def cleanup_temp_data():
     if os.path.exists('temp_data'):
-        print("🧹 Moon Dev cleaning up temporary data...")
+        print("🧹 Billy Bitcoin cleaning up temporary data...")
         shutil.rmtree('temp_data')
 
 atexit.register(cleanup_temp_data)
@@ -133,20 +121,30 @@ def get_product_stats(symbol):
         print(f"Failed to retrieve stats for {symbol}: HTTP status code {response.status_code}")
         return None
 
+def format_number(value):
+    """Format number with appropriate precision based on magnitude"""
+    if value == 0:
+        return "0.00000000"
+    
+    # Determine number of leading zeros after decimal
+    magnitude = abs(math.floor(math.log10(abs(value))))
+    if value < 1:
+        precision = magnitude + 8  # Show 8 significant digits after leading zeros
+    else:
+        precision = 8  # Use 8 decimal places for numbers >= 1
+    
+    return f"{value:.{precision}f}"
+
 def get_product_price(symbol):
-    """
-    Get current price for a symbol
-    """
+    """Get current price for a product with proper precision"""
     try:
-        response = rest_client.get_market_trades(
-            product_id=symbol,
-            limit=1
-        )
-        if response and response.trades:
-            return float(response.trades[0].price)
+        response = rest_client.get_product(product_id=symbol)
+        if response:
+            price = float(response.price)
+            return float(format_number(price))
         return None
     except Exception as e:
-        print(f"Error getting price: {str(e)}")
+        print(f"Error getting product price: {str(e)}")
         return None
 
 def get_available_products():
@@ -168,7 +166,7 @@ def get_available_products():
             ]
             
             # Sort by volume and get top 10
-            sorted_products = sorted(products, key=lambda x: x['volume'], reverse=True)[:10]
+            sorted_products = sorted(products, key=lambda x: x['volume'], reverse=True)[:2]  ### made it less for t4estin
             return [p['product_id'] for p in sorted_products]
         return None
     except Exception as e:
@@ -192,31 +190,22 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
     """
     try:
         cprint(f"\n📊 Fetching historical data for {symbol}...", "white", "on_blue")
-        end_time = datetime.now()  # Use UTC time
+        
+        # Use UTC time for consistency with Coinbase API
+        end_time = datetime.utcnow()
         start_time = end_time - timedelta(days=days_back)
         
-        # Debug timezone info
-        local_time = datetime.now()
-        cprint(f"\n🕒 Timezone Debug:", "cyan")
-        print(f"Local time: {local_time}")
-        print(f"UTC time: {end_time}")
-        print(f"Time difference: {local_time - end_time}")
+        # # Debug time calculations
+        # print("\n🕒 Time calculations:")
+        # print(f"Current time (UTC): {datetime.utcnow()}")
+        # print(f"End time (UTC): {end_time}")
+        # print(f"Start time (UTC): {start_time}")
         
-        # Calculate how many candles we'll get based on granularity and days_back
-        candles_requested = (days_back * 24 * 3600) / granularity
-        
-        # If we're requesting more than 300 candles (leaving buffer), adjust days_back
-        if candles_requested > 300:
-            # Adjust days_back to stay under limit
-            days_back = (300 * granularity) / (24 * 3600)
-            start_time = end_time - timedelta(days=days_back)
-            cprint(f"⚠️ Adjusted request to {days_back:.1f} days to respect Coinbase's candle limit", "yellow")
-        
-        # Convert to Unix timestamps (ensure they're in the past)
+        # Convert to Unix timestamps
         start_unix = int(start_time.timestamp())
         end_unix = int(end_time.timestamp())
         
-        # Convert numeric granularity to Coinbase's expected format
+        # Update granularity map to match new API
         granularity_map = {
             60: "ONE_MINUTE",
             300: "FIVE_MINUTE",
@@ -228,16 +217,40 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             86400: "ONE_DAY"
         }
         
+        # If granularity is a string, convert it to seconds first
+        if isinstance(granularity, str):
+            reverse_map = {v: k for k, v in granularity_map.items()}
+            if granularity in reverse_map:
+                granularity = reverse_map[granularity]
+        
+        # Calculate how many candles we'll get based on time difference
+        time_diff_seconds = end_unix - start_unix
+        candles_requested = max(1, time_diff_seconds // granularity)  # Ensure at least 1 candle
+        
+        # Coinbase has different limits for different timeframes
+        max_candles = 300  # Default limit
+        if granularity == 60:  # 1-minute candles
+            max_candles = 1000  # Coinbase allows more for 1-minute data
+        
+        # If we're requesting more than max_candles, adjust days_back
+        if candles_requested > max_candles:
+            days_back = (max_candles * granularity) / (24 * 3600)
+            start_time = end_time - timedelta(days=days_back)
+            start_unix = int(start_time.timestamp())
+            cprint(f"⚠️ Adjusted request to {days_back:.1f} days to respect Coinbase's {max_candles} candle limit", "yellow")
+        
+        # Get the Coinbase granularity string
         cb_granularity = granularity_map.get(granularity, "ONE_HOUR")
         
-        # Debug info
-        cprint(f"\nRequest details:", "cyan")
-        print(f"Symbol: {symbol}")
-        print(f"Start time (UTC): {start_time}")
-        print(f"End time (UTC): {end_time}")
-        print(f"Start timestamp: {start_unix}")
-        print(f"End timestamp: {end_unix}")
-        print(f"Granularity: {cb_granularity}")
+        # # Debug info
+        # cprint(f"\nRequest details:", "cyan")
+        # print(f"Symbol: {symbol}")
+        # print(f"Start time (UTC): {start_time}")
+        # print(f"End time (UTC): {end_time}")
+        # print(f"Start timestamp: {start_unix}")
+        # print(f"End timestamp: {end_unix}")
+        # print(f"Granularity: {cb_granularity}")
+        # print(f"Expected candles: {int(candles_requested)}")
         
         response = rest_client.get_candles(
             product_id=symbol,
@@ -262,7 +275,7 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
         data = []
         for candle in response.candles:
             data.append({
-                'start': int(candle.start),
+                'start': pd.to_datetime(int(candle.start), unit='s'),  # Convert Unix timestamp to datetime
                 'open': float(candle.open),
                 'high': float(candle.high),
                 'low': float(candle.low),
@@ -275,7 +288,6 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             return pd.DataFrame()
             
         df = pd.DataFrame(data)
-        df['datetime'] = pd.to_datetime(df['start'], unit='s')
         
         # Calculate indicators
         if len(df) > 0:
@@ -296,6 +308,11 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             df['Price_above_MA40'] = df['close'] > df['MA40']
             df['MA20_above_MA40'] = df['MA20'] > df['MA40']
         
+        # Convert data to proper precision
+        for col in ['open', 'high', 'low', 'close']:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: float(format_number(x)))
+        
         return df.sort_values('start', ascending=True)
         
     except Exception as e:
@@ -305,108 +322,108 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
         print(traceback.format_exc())
         return pd.DataFrame()
 
-def market_buy(symbol, amount, slippage=None):
-    """
-    Execute a market buy order
-    symbol: Trading pair (e.g. 'BTC-USD')
-    amount: Amount in quote currency (e.g. USD)
-    """
+def get_product_precision(symbol):
+    """Get the base and quote precision for a trading pair"""
     try:
-        # Check available balance first
-        balance = get_account_balance("USD")
-        if not balance or balance['available'] < amount:
-            cprint(f"❌ Insufficient USD balance. Need ${amount:.2f}, have ${balance['available']:.2f}", "white", "on_red")
-            return None
+        product = get_product_overview(symbol)
+        if product:
+            base_increment = product.get('base_increment', '0.00000001')
+            quote_increment = product.get('quote_increment', '0.01')
+            
+            # Calculate decimal places
+            base_precision = abs(decimal.Decimal(base_increment).as_tuple().exponent)
+            quote_precision = abs(decimal.Decimal(quote_increment).as_tuple().exponent)
+            
+            return base_precision, quote_precision
+    except Exception as e:
+        print(f"Error getting precision: {str(e)}")
+        return 8, 2  # Default fallback values
+        
+def round_to_precision(amount, precision):
+    """Round amount to specified decimal precision"""
+    return float('{:.{}f}'.format(amount, precision))
 
-        # Round amount to 2 decimal places for USD
-        rounded_amount = round(float(amount), 2)
+def generate_order_id():
+    """Generate a unique order ID"""
+    return str(uuid.uuid4())
+
+def market_buy(symbol, usd_amount, slippage=None):
+    """Modified market buy with proper precision handling and minimum order size"""
+    try:
+        # Get product precision
+        base_precision, quote_precision = get_product_precision(symbol)
         
-        # Generate a unique client_order_id using timestamp
-        client_order_id = f"buy_{symbol}_{int(time.time() * 1000)}"
+        # Round USD amount to quote precision
+        usd_amount = round_to_precision(usd_amount, quote_precision)
         
+        # Check minimum order size ($0.1 USD for Coinbase)
+        MIN_ORDER_SIZE = 0.1
+        if usd_amount < MIN_ORDER_SIZE:
+            print(f"❌ Order amount ${usd_amount} below minimum (${MIN_ORDER_SIZE})")
+            return False
+            
+        # Create the market order with a unique client_order_id
         response = rest_client.create_order(
-            client_order_id=client_order_id,
             product_id=symbol,
             side='BUY',
+            client_order_id=generate_order_id(),  # Generate unique ID for each order
             order_configuration={
                 'market_market_ioc': {
-                    'quote_size': str(rounded_amount)  # Use rounded amount
+                    'quote_size': str(usd_amount)  # Convert to string as required by API
                 }
             }
         )
         
-        # Check response format
-        if hasattr(response, 'success') and response.success:
-            order_details = response.success_response
-            order_id = order_details.get('order_id')
-            cprint(f"🚀 Market buy order placed for {symbol}: Order ID {order_id}", "white", "on_green")
-            return order_details
+        if response:
+            print(f"✅ Market buy order placed: {response}")
+            return True
         else:
-            error_msg = getattr(response, 'error_response', {}).get('message', 'Unknown error')
-            error_details = getattr(response, 'error_response', {}).get('error_details', '')
-            preview_failure = getattr(response, 'error_response', {}).get('preview_failure_reason', '')
-            cprint(f"❌ Failed to place market buy order: {error_msg}", "white", "on_red")
-            if error_details:
-                cprint(f"Error details: {error_details}", "white", "on_red")
-            if preview_failure:
-                cprint(f"Preview failure: {preview_failure}", "white", "on_red")
-            return None
+            print("❌ No response from order creation")
+            return False
             
     except Exception as e:
-        cprint(f"❌ Error placing market buy order: {str(e)}", "white", "on_red")
-        return None
+        print(f"❌ Failed to place market buy order: {str(e)}")
+        return False
 
 def market_sell(symbol, amount, slippage=None):
-    """
-    Execute a market sell order
-    symbol: Trading pair (e.g. 'BTC-USD')
-    amount: Amount in base currency (e.g. BTC)
-    """
+    """Modified market sell with proper precision handling"""
     try:
-        # Check available balance first
-        base_currency = symbol.split('-')[0]
-        position = get_position(symbol)
+        # Get product precision
+        base_precision, _ = get_product_precision(symbol)
         
-        if position < amount:
-            cprint(f"❌ Insufficient {base_currency} balance. Need {amount:.8f}, have {position:.8f}", "white", "on_red")
-            return None
-
-        # Generate a unique client_order_id using timestamp
-        client_order_id = f"sell_{symbol}_{int(time.time() * 1000)}"
+        # Round amount to base precision
+        amount = round_to_precision(amount, base_precision)
         
+        if amount <= 0:
+            print(f"❌ Invalid sell amount: {amount}")
+            return False
+            
+        # Create the market order with a unique client_order_id
         response = rest_client.create_order(
-            client_order_id=client_order_id,
             product_id=symbol,
             side='SELL',
+            client_order_id=generate_order_id(),
             order_configuration={
                 'market_market_ioc': {
-                    'base_size': str(amount)
+                    'base_size': str(amount)  # Convert to string as required by API
                 }
             }
         )
         
-        # Check response format
-        if hasattr(response, 'success') and response.success:
-            order_details = response.success_response
-            order_id = order_details.get('order_id')
-            cprint(f"📉 Market sell order placed for {symbol}: Order ID {order_id}", "white", "on_blue")
-            return order_details
+        if response:
+            print(f"✅ Market sell order placed: {response}")
+            return True
         else:
-            error_msg = getattr(response, 'error_response', {}).get('message', 'Unknown error')
-            cprint(f"❌ Failed to place market sell order: {error_msg}", "white", "on_red")
-            return None
-            
+            print("❌ No response from order creation")
+            return False
+        
     except Exception as e:
-        cprint(f"❌ Error placing market sell order: {str(e)}", "white", "on_red")
-        return None
+        print(f"❌ Failed to place market sell order: {str(e)}")
+        return False
 
 def get_account_balance(currency='USD'):
-    """
-    Get account balance for a specific currency
-    Documentation: GET /brokerage/accounts
-    """
+    """Get account balance for a specific currency"""
     try:
-        # Use the REST client instead of direct API call
         response = rest_client.get_accounts()
         
         if response and hasattr(response, 'accounts'):
@@ -414,7 +431,7 @@ def get_account_balance(currency='USD'):
                 if account.currency == currency:
                     return {
                         'currency': currency,
-                        'balance': float(account.available_balance['value']),
+                        'balance': float(account.available_balance['value']),  # Use dict access
                         'available': float(account.available_balance['value']),
                         'hold': float(account.hold['value'])
                     }
@@ -425,21 +442,17 @@ def get_account_balance(currency='USD'):
         return None
 
 def get_position(symbol):
-    """
-    Get current position size for a given trading pair
-    Returns amount in base currency
-    """
+    """Get current position size for a given trading pair"""
     base_currency = symbol.split('-')[0]
     
     try:
-        # Use the REST client instead of direct API call
         response = rest_client.get_accounts()
         
         if response and hasattr(response, 'accounts'):
             for account in response.accounts:
                 if account.currency == base_currency:
-                    return float(account.available_balance['value'])
-            return 0.0  # Return 0 if currency not found
+                    return float(account.available_balance['value'])  # Use dict access
+            return 0.0
         else:
             cprint(f"❌ Failed to get position: No accounts found", "white", "on_red")
             return 0.0
@@ -452,7 +465,7 @@ def chunk_kill(symbol, max_usd_order_size, slippage=None):
     """
     Kill a position in chunks
     """
-    cprint(f"\n🔪 Moon Dev's AI Agent initiating position exit for {symbol}...", "white", "on_cyan")
+    cprint(f"\n🔪 Billy Bitcoin's AI Agent initiating position exit for {symbol}...", "white", "on_cyan")
     
     position_size = get_position(symbol)
     if position_size <= 0:
@@ -640,47 +653,81 @@ def breakout_entry(symbol, breakout_price, usd_size, max_usd_order_size, orders_
 
 def ai_entry(symbol, amount, max_usd_order_size, orders_per_open=3, slippage=None, tx_sleep=2):
     """
-    AI agent entry function for Moon Dev's trading system 🤖
+    AI agent entry function with minimum order size handling
     """
-    cprint("🤖 Moon Dev's AI Trading Agent initiating position entry...", "white", "on_blue")
+    cprint("🤖 Billy Bitcoin's AI Trading Agent initiating position entry...", "white", "on_blue")
+    
+    MIN_ORDER_SIZE = 0.01  # Minimum order size in USD
     
     pos = get_position(symbol)
     price = get_product_price(symbol)
-    pos_usd = pos * price
+    pos_usd = pos * price if price else 0
     
     cprint(f"🎯 Target allocation: ${amount:.2f} USD", "white", "on_blue")
     cprint(f"📊 Current position: ${pos_usd:.2f} USD", "white", "on_blue")
     
     if pos_usd >= (amount * 0.97):
         cprint("✋ Position already at or above target size!", "white", "on_blue")
-        return
+        return True
         
     size_needed = amount - pos_usd
     if size_needed <= 0:
         cprint("🛑 No additional size needed", "white", "on_blue")
-        return
+        return True
         
+    # Check if remaining size is too small
+    if size_needed < MIN_ORDER_SIZE:
+        cprint(f"⚠️ Remaining size (${size_needed:.2f}) below minimum order size (${MIN_ORDER_SIZE})", "yellow")
+        return False
+        
+    # Get available USD balance directly from accounts
+    try:
+        response = rest_client.get_accounts()
+        available_usd = 0
+        if response and hasattr(response, 'accounts'):
+            for account in response.accounts:
+                if account.currency == 'USD':
+                    available_usd = float(account.available_balance['value'])
+                    break
+        
+        if available_usd < size_needed:
+            cprint(f"❌ Insufficient USD balance (${available_usd:.2f}) for target allocation (${amount:.2f})", "white", "on_red")
+            return False
+            
+    except Exception as e:
+        cprint(f"❌ Error checking USD balance: {str(e)}", "white", "on_red")
+        return False
+    
     if size_needed > max_usd_order_size:
         chunk_size = max_usd_order_size
     else:
         chunk_size = size_needed
     
+    # Ensure chunk size is at least minimum order size
+    chunk_size = max(chunk_size, MIN_ORDER_SIZE)
+    
     cprint(f"💫 Entry chunk size: ${chunk_size:.2f}", "white", "on_blue")
 
+    success = False
     while pos_usd < (amount * 0.97):
         try:
             for i in range(orders_per_open):
-                result = market_buy(symbol, chunk_size, slippage)
-                if result:
-                    cprint(f"🚀 AI Agent placed order {i+1}/{orders_per_open} for {symbol}", "white", "on_blue")
-                time.sleep(1)
+                if chunk_size >= MIN_ORDER_SIZE:
+                    result = market_buy(symbol, chunk_size, slippage)
+                    if result:
+                        cprint(f"🚀 AI Agent placed order {i+1}/{orders_per_open} for {symbol}", "white", "on_blue")
+                        success = True
+                    time.sleep(1)
+                else:
+                    cprint(f"⚠️ Chunk size (${chunk_size:.2f}) below minimum", "yellow")
+                    break
 
             time.sleep(tx_sleep)
             
             # Update position info
             pos = get_position(symbol)
             price = get_product_price(symbol)
-            pos_usd = pos * price
+            pos_usd = pos * price if price else 0
             
             if pos_usd >= (amount * 0.97):
                 break
@@ -693,6 +740,11 @@ def ai_entry(symbol, amount, max_usd_order_size, orders_per_open=3, slippage=Non
                 chunk_size = max_usd_order_size
             else:
                 chunk_size = size_needed
+                
+            # Check if remaining size is too small
+            if chunk_size < MIN_ORDER_SIZE:
+                cprint(f"⚠️ Remaining size (${chunk_size:.2f}) below minimum order size", "yellow")
+                break
 
         except Exception as e:
             cprint(f"❌ Error during entry: {str(e)}", "white", "on_red")
@@ -700,11 +752,12 @@ def ai_entry(symbol, amount, max_usd_order_size, orders_per_open=3, slippage=Non
     
     final_pos = get_position(symbol)
     final_price = get_product_price(symbol)
-    final_pos_usd = final_pos * final_price
+    final_pos_usd = final_pos * final_price if final_price else 0
     
     cprint(f"\n📊 Final position: {final_pos:.8f} {symbol.split('-')[0]} (${final_pos_usd:.2f})", "white", "on_blue")
+    return success
 
-def supply_demand_zones(symbol, timeframe=3600, limit=100):
+def supply_demand_zones(symbol, timeframe=900, limit=300):
     """
     Calculate supply and demand zones for a given symbol
     timeframe: in seconds (e.g., 3600 for 1h)
@@ -742,7 +795,7 @@ def supply_demand_zones(symbol, timeframe=3600, limit=100):
 
 def close_all_positions():
     """
-    Close all open positions except USD
+    Close all open positions except USD and USDC
     """
     # Get all accounts
     request_path = '/accounts'
@@ -754,17 +807,17 @@ def close_all_positions():
         if response.status_code == 200:
             accounts = response.json()
             
-            # Filter for non-USD accounts with balance > 0
+            # Filter for non-USD/USDC accounts with balance > 0
             active_positions = [
                 account for account in accounts 
-                if account['currency'] != 'USD' 
+                if account['currency'] not in ['USD', 'USDC']
                 and float(account['balance']) > 0
             ]
             
             for position in active_positions:
                 currency = position['currency']
                 balance = float(position['balance'])
-                symbol = f"{currency}-USD"  # Assuming USD as quote currency
+                symbol = f"{currency}-USD"  # Using USD as quote currency
                 
                 cprint(f"\n🔄 Closing position for {symbol}...", "white", "on_cyan")
                 
@@ -906,30 +959,6 @@ def test_account_functions():
         print("\nFull error traceback:")
         print(traceback.format_exc())
 
-def test_credentials():
-    """
-    Test if the API credentials are properly configured
-    """
-    print("\nTesting API Credentials:")
-    
-    try:
-        if rest_client is None:
-            print("❌ REST client not initialized")
-            return False
-            
-        # Test basic API call
-        response = rest_client.get_accounts()
-        if response and response.accounts:
-            print("✅ API credentials working correctly")
-            return True
-        else:
-            print("❌ API response invalid")
-            return False
-    except Exception as e:
-        print(f"❌ API test failed: {str(e)}")
-        print("Are you sure you generated your key at https://cloud.coinbase.com/access/api ?")
-        return False
-
 # Initialize WebSocket client (if needed)
 def init_websocket():
     """
@@ -957,28 +986,6 @@ def init_websocket():
         print(f"Error initializing WebSocket: {str(e)}")
         return None
 
-def debug_credentials():
-    """Debug function to check API credentials"""
-    print("\nDebugging API Credentials:")
-    
-    api_key = os.getenv("COINBASE_API_KEY")
-    api_secret = os.getenv("COINBASE_API_SECRET")
-    
-    print("\nAPI Key:")
-    print(f"- Present: {'Yes' if api_key else 'No'}")
-    if api_key:
-        print(f"- Format correct: {'Yes' if api_key.startswith('organizations/') else 'No'}")
-        print(f"- Length: {len(api_key)}")
-    
-    print("\nSecret Key:")
-    print(f"- Present: {'Yes' if api_secret else 'No'}")
-    print(api_secret)
-    if api_secret:
-        print(f"- Starts correctly: {'Yes' if '-----BEGIN EC PRIVATE KEY-----' in api_secret else 'No'}")
-        print(f"- Ends correctly: {'Yes' if '-----END EC PRIVATE KEY-----' in api_secret else 'No'}")
-        print(f"- Contains newlines: {'Yes' if chr(92) + 'n' in api_secret else 'No'}")
-        print(f"- Length: {len(api_secret)}")
-
 def verify_trading_pair(symbol):
     """
     Verify if a trading pair is valid and active on Coinbase
@@ -996,15 +1003,37 @@ def verify_trading_pair(symbol):
         cprint(f"❌ Error verifying {symbol}: {str(e)}", "white", "on_red")
         return False
 
+def get_usd_balance():
+    """
+    Get USD balance directly from accounts
+    Returns the available USD balance
+    """
+    try:
+        response = rest_client.get_accounts()
+        if response and hasattr(response, 'accounts'):
+            for account in response.accounts:
+                if account.currency == 'USD':
+                    return float(account.available_balance['value'])
+        return 0.0
+    except Exception as e:
+        print(f"Error getting USD balance: {str(e)}")
+        return 0.0
+
 def get_token_balance_usd(symbol):
     """
     Get token balance in USD for a given symbol (e.g. 'BTC-USD')
     Returns the USD value of the position
+    Note: For USD balance, use get_usd_balance() instead
     """
     try:
         # Extract base currency from symbol (e.g. 'BTC' from 'BTC-USD')
         base_currency = symbol.split('-')[0]
         
+        # Return 0 if trying to get USD balance through this function
+        if base_currency == 'USD':
+            print("For USD balance, please use get_usd_balance() instead")
+            return 0.0
+            
         # Get position size in base currency
         position = get_position(symbol)
         
@@ -1019,3 +1048,27 @@ def get_token_balance_usd(symbol):
     except Exception as e:
         print(f"Error getting token balance in USD: {str(e)}")
         return 0.0 
+def sell_token_amount(token, amount):
+    """Sell exact amount of tokens using market order"""
+    try:
+        # Get product precision
+        base_precision, _ = get_product_precision(token)
+        
+        # Round the amount to the correct precision
+        rounded_amount = round_to_precision(amount, base_precision)
+        
+        order = rest_client.create_order(
+            product_id=token,
+            side='SELL',
+            client_order_id=generate_order_id(),
+            order_configuration={
+                'market_market_ioc': {
+                    'base_size': str(rounded_amount)  # Use rounded amount
+                }
+            }
+        )
+        print(f"✅ Market sell order placed: {order}")
+        return True
+    except Exception as e:
+        print(f"❌ Market sell failed: {str(e)}")
+        return False

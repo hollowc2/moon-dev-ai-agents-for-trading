@@ -1,6 +1,6 @@
 """
-📊 Moon Dev's Chart Analysis Agent
-Built with love by Moon Dev 🌙
+📊 Billy Bitcoin's Chart Analysis Agent
+Built with love by Billy Bitcoin 🌙
 
 Chuck the Chart Agent generates and analyzes trading charts using AI vision capabilities.
 """
@@ -16,25 +16,33 @@ import time
 from dotenv import load_dotenv
 import anthropic
 import openai
-from src import nice_funcs as n
-from src import nice_funcs_hl as hl
 from src import nice_funcs_cb as cb
 from src.agents.base_agent import BaseAgent
 import traceback
 import base64
 from io import BytesIO
 import re
+import pandas_ta as ta
+import math
+
+# Register pandas_ta with pandas
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+# This line is crucial - it registers the ta namespace
+pd.DataFrame.ta.cores = True  # Enable parallel processing for indicators
 
 # Get the project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Configuration
-CHECK_INTERVAL_MINUTES = 10  # 3 hours and 53 minutes
-TIMEFRAMES = ['15m']#['15m', '1h', '4h', '1d']  # Multiple timeframes to analyze
-LOOKBACK_BARS = 100  # Number of candles to analyze
+CHECK_INTERVAL_MINUTES = 10
+TIMEFRAMES = ['5m']  # Coinbase supported timeframes: ['1m', '5m', '15m', '1h', '6h', '1d']
+LOOKBACK_BARS = 300
 
-# Trading Pairs to Monitor
-SYMBOLS = ["BTC", "TOSHI"]  # Add or modify symbols here
+# Trading Pairs to Monitor - Update to use Coinbase format
+
+SYMBOLS = ["BTC-USD"]  # Coinbase uses -USD format
 
 # Chart Settings
 CHART_STYLE = 'charles'  # mplfinance style
@@ -73,7 +81,7 @@ Remember:
 class ChartAnalysisAgent(BaseAgent):
     """Chuck the Chart Analysis Agent 📊"""
     
-    def __init__(self):
+    def __init__(self, symbols=None):
         """Initialize Chuck the Chart Agent"""
         super().__init__('chartanalysis')
         
@@ -82,6 +90,9 @@ class ChartAnalysisAgent(BaseAgent):
         self.audio_dir = PROJECT_ROOT / "src" / "audio"
         self.charts_dir.mkdir(parents=True, exist_ok=True)
         self.audio_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Use passed symbols or default to BTC-USD
+        self.symbols = symbols if symbols else ["BTC-USD"]
         
         # Load environment variables
         load_dotenv()
@@ -107,7 +118,34 @@ class ChartAnalysisAgent(BaseAgent):
             print("⚠️ Note: Using some override settings instead of config.py defaults")
         print(f"🎯 Analyzing {len(TIMEFRAMES)} timeframes: {', '.join(TIMEFRAMES)}")
         print(f"📈 Using indicators: {', '.join(INDICATORS)}")
+        print(f"🪙 Monitoring {len(self.symbols)} symbols: {', '.join(self.symbols)}")
         
+    def _convert_timeframe_to_seconds(self, timeframe):
+        """Convert timeframe string to seconds for Coinbase API"""
+        multiplier = int(timeframe[:-1])
+        unit = timeframe[-1]
+        
+        if unit == 'm':
+            return multiplier * 60
+        elif unit == 'h':
+            return multiplier * 3600
+        elif unit == 'd':
+            return multiplier * 86400
+        return 3600  # Default to 1h if invalid
+
+    def _get_timeframe_multiplier(self, timeframe):
+        """Get multiplier for calculating days_back based on timeframe"""
+        unit = timeframe[-1]
+        value = int(timeframe[:-1])
+        
+        if unit == 'm':
+            return value / (24 * 60)
+        elif unit == 'h':
+            return value / 24
+        elif unit == 'd':
+            return value
+        return 1  # Default multiplier
+
     def _generate_chart(self, symbol, timeframe, data):
         """Generate a chart using mplfinance"""
         try:
@@ -120,33 +158,83 @@ class ChartAnalysisAgent(BaseAgent):
                 print("❌ No data available for chart generation")
                 return None
                 
-            # Calculate indicators
+            # Calculate indicators directly using pandas_ta on the DataFrame
+            # Use min_periods parameter to start calculating as soon as possible
             if 'SMA20' in INDICATORS:
-                df['SMA20'] = df['close'].rolling(window=20).mean()
+                df['SMA20'] = df['close'].rolling(window=20, min_periods=1).mean()
             if 'SMA50' in INDICATORS:
-                df['SMA50'] = df['close'].rolling(window=50).mean()
+                df['SMA50'] = df['close'].rolling(window=50, min_periods=1).mean()
             if 'SMA200' in INDICATORS:
-                df['SMA200'] = df['close'].rolling(window=200).mean()
+                df['SMA200'] = df['close'].rolling(window=200, min_periods=1).mean()
+            if 'RSI' in INDICATORS:
+                df['RSI'] = ta.rsi(df['close'])
+            if 'MACD' in INDICATORS:
+                macd = ta.macd(df['close'])
+                if isinstance(macd, pd.DataFrame):
+                    df = pd.concat([df, macd], axis=1)
             
-            # Create addplot for indicators
+            # Get supply and demand zones
+            sd_df = cb.supply_demand_zones(symbol, timeframe=self._convert_timeframe_to_seconds(timeframe))
+            demand_zone = sd_df['dz'].values
+            supply_zone = sd_df['sz'].values
+
+            # Create addplot for indicators with better visibility
             ap = []
             colors = ['blue', 'orange', 'purple']
+            linewidths = [1.5, 1.5, 1.5]  # Increased line width for better visibility
             for i, sma in enumerate(['SMA20', 'SMA50', 'SMA200']):
-                if sma in INDICATORS and sma in df.columns and not df[sma].isna().all():
-                    ap.append(mpf.make_addplot(df[sma], color=colors[i]))
+                if sma in INDICATORS and sma in df.columns:
+                    if not df[sma].isna().all():
+                        ap.append(mpf.make_addplot(df[sma], 
+                                                 color=colors[i],
+                                                 width=linewidths[i],
+                                                 secondary_y=False))
             
-            # Save chart
+            # Add horizontal lines for supply and demand zones
+            for dz in demand_zone:
+                ap.append(mpf.make_addplot([dz] * len(df), color='green', linestyle='--'))
+            for sz in supply_zone:
+                ap.append(mpf.make_addplot([sz] * len(df), color='red', linestyle='--'))
+            
+            # Save chart with improved styling
             filename = f"{symbol}_{timeframe}_{int(time.time())}.png"
             chart_path = self.charts_dir / filename
             
-            # Create the chart
+            # Create the chart with better styling
             mpf.plot(df,
                     type='candle',
                     style=CHART_STYLE,
                     volume=VOLUME_PANEL,
                     addplot=ap if ap else None,
-                    title=f"\n{symbol} {timeframe} Chart Analysis by Moon Dev 🌙",
+                    title=f"\n{symbol} {timeframe} Chart Analysis by Billy Bitcoin 🌙",
+                    figsize=(12, 8),  # Larger figure size
+                    panel_ratios=(3, 1),  # Better ratio between price and volume
+                    datetime_format='%m-%d %H:%M',  # Cleaner date format
+                    xrotation=45,  # Angled dates for better readability
                     savefig=chart_path)
+            
+            # Print nicely formatted data table with wider columns
+            print("\n" + "╔" + "═" * 100 + "╗")
+            print(f"║    🌙 Chart Data for {symbol} {timeframe} - Last 5 Candles" + " " * 45 + "║")
+            print("╠" + "═" * 100 + "╣")
+            print("║ Time                │ Open          │ High          │ Low           │ Close         │ Volume      ║")
+            print("╟" + "─" * 100 + "╢")
+            
+            # Print last 5 candles with proper formatting and wider columns
+            last_5 = df.tail(5)
+            for idx, row in last_5.iterrows():
+                time_str = idx.strftime('%Y-%m-%d %H:%M')
+                print(f"║ {time_str:<16} │ {row['open']:12.2f} │ {row['high']:12.2f} │ {row['low']:12.2f} │ {row['close']:12.2f} │ {row['volume']:10.0f} ║")
+            
+            print("║" + " " * 100 + "║")
+            print("║ Technical Indicators:" + " " * 79 + "║")
+            print(f"║ SMA20: {df['SMA20'].iloc[-1]:.2f}" + " " * 85 + "║")
+            print(f"║ SMA50: {df['SMA50'].iloc[-1]:.2f}" + " " * 85 + "║")
+            print(f"║ SMA200: {df['SMA200'].iloc[-1] if not pd.isna(df['SMA200'].iloc[-1]) else 'Not enough data'}" + " " * 75 + "║")
+            print(f"║ 24h High: {df['high'].max():.2f}" + " " * 83 + "║")
+            print(f"║ 24h Low: {df['low'].min():.2f}" + " " * 84 + "║")
+            print(f"║ Volume Trend: {'Increasing' if df['volume'].iloc[-1] > df['volume'].mean() else 'Decreasing'}" + " " * 75 + "║")
+            print("╚" + "═" * 100 + "╝")
             
             return chart_path
             
@@ -156,126 +244,126 @@ class ChartAnalysisAgent(BaseAgent):
             return None
             
     def _analyze_chart(self, symbol, timeframe, data):
-        """Analyze chart data using Claude"""
+        """Analyze chart data and return signals"""
         try:
-            # Format the chart data
-            chart_data = (
-                f"Recent price action (last 5 candles):\n{data.tail(5).to_string()}\n\n"
-                f"Technical Indicators:\n"
-                f"- SMA20: {data['SMA20'].iloc[-1]:.2f}\n"
-                f"- SMA50: {data['SMA50'].iloc[-1]:.2f}\n"
-                f"- SMA200: {data['SMA200'].iloc[-1] if not pd.isna(data['SMA200'].iloc[-1]) else 'Not enough data'}\n"
-                f"Current price: {data['close'].iloc[-1]:.2f}\n"
-                f"24h High: {data['high'].max():.2f}\n"
-                f"24h Low: {data['low'].min():.2f}\n"
-                f"Volume trend: {'Increasing' if data['volume'].iloc[-1] > data['volume'].mean() else 'Decreasing'}"
+            # Ensure index is datetime
+            if not isinstance(data.index, pd.DatetimeIndex):
+                data.index = pd.to_datetime(data.index, unit='s')  # Convert Unix timestamps to datetime
+            
+            # Calculate indicators first
+            data['SMA20'] = data['close'].rolling(window=20).mean()
+            data['SMA50'] = data['close'].rolling(window=50).mean()
+            data['RSI'] = self._calculate_rsi(data['close'])
+            data['MACD'], data['Signal'], data['Hist'] = self._calculate_macd(data['close'])
+            
+            # Get latest values
+            current_price = data['close'].iloc[-1]
+            sma20 = data['SMA20'].iloc[-1]
+            sma50 = data['SMA50'].iloc[-1]
+            rsi = data['RSI'].iloc[-1]
+            macd = data['MACD'].iloc[-1]
+            signal = data['Signal'].iloc[-1]
+            
+            # Determine decimal precision based on price
+            def get_precision(value):
+                if value == 0:
+                    return 8
+                magnitude = abs(math.floor(math.log10(abs(value))))
+                return magnitude + 8  # Add 8 decimal places after significant digits
+            
+            precision = get_precision(current_price)
+            
+            # Format analysis text with dynamic precision
+            analysis_text = (
+                f"📊 {symbol} {timeframe} Analysis:\n"
+                f"- Price: ${current_price:.{precision}f}\n"
+                f"- SMA20: ${sma20:.{precision}f}\n"
+                f"- SMA50: ${sma50:.{precision}f}\n"
+                f"- RSI: {rsi:.2f}\n"
+                f"- MACD: {macd:.{precision}f}\n"
             )
             
-            # Prepare the context
-            context = CHART_ANALYSIS_PROMPT.format(
-                symbol=symbol,
-                timeframe=timeframe,
-                chart_data=chart_data
-            )
+            # Print market data with proper precision
+            print("\n" + "╔" + "═" * 100 + "╗")
+            print(f"║    🌙 Chart Data for {symbol} {timeframe} - Last 5 Candles" + " " * 45 + "║")
+            print("╠" + "═" * 100 + "╣")
+            print("║ Time                │ Open          │ High          │ Low           │ Close         │ Volume      ║")
+            print("╟" + "─" * 100 + "╢")
             
-            print(f"\n🤖 Analyzing {symbol} with AI...")
+            last_5 = data.tail(5)
+            for idx, row in last_5.iterrows():
+                # Format timestamp to string
+                time_str = idx.strftime('%Y-%m-%d %H:%M')
+                print(f"║ {time_str:<16} │ {row['open']:.{precision}f} │ {row['high']:.{precision}f} │ "
+                      f"{row['low']:.{precision}f} │ {row['close']:.{precision}f} │ {row['volume']:10.2f} ║")
             
-            # Get AI analysis using instance settings
-            message = self.client.messages.create(
-                model=self.ai_model,
-                max_tokens=self.ai_max_tokens,
-                temperature=self.ai_temperature,
-                messages=[{
-                    "role": "user",
-                    "content": context
-                }]
-            )
+            # Determine signals
+            action = "NOTHING"
+            confidence = 0
+            direction = "SIDEWAYS"
             
-            if not message or not message.content:
-                print("❌ No response from AI")
-                return None
-                
-            # Debug: Print raw response
-            print("\n🔍 Raw response:")
-            print(repr(message.content))
-            
-            # Get the raw content and convert to string
-            content = str(message.content)
-            
-            # Clean up TextBlock formatting - new format handling
-            if 'TextBlock' in content:
-                # Extract just the text content between quotes
-                match = re.search(r"text='([^']*)'", content, re.IGNORECASE)
-                if match:
-                    content = match.group(1)
-            
-            # Clean up any remaining formatting
-            content = content.replace('\\n', '\n')
-            content = content.strip('[]')
-            
-            # Split into lines and clean each line
-            lines = [line.strip() for line in content.split('\n') if line.strip()]
-            
-            if not lines:
-                print("❌ Empty response from AI")
-                return None
-            
-            # First line should be the action
-            action = lines[0].strip().upper()
-            if action not in ['BUY', 'SELL', 'NOTHING']:
-                print(f"⚠️ Invalid action: {action}")
-                return None
-            
-            # Rest is analysis
-            analysis = lines[1] if len(lines) > 1 else ""
-            
-            # Extract confidence from third line
-            confidence = 50  # Default confidence
-            if len(lines) > 2:
-                try:
-                    matches = re.findall(r'(\d+)%', lines[2])
-                    if matches:
-                        confidence = int(matches[0])
-                except:
-                    print("⚠️ Could not parse confidence, using default")
-            
-            # Determine direction based on action
-            if action == 'BUY':
-                direction = 'BULLISH'
-            elif action == 'SELL':
-                direction = 'BEARISH'
-            else:
-                direction = 'SIDEWAYS'
+            # Simple strategy logic
+            if current_price > sma20 and current_price > sma50 and rsi > 50 and macd > signal:
+                action = "BUY"
+                direction = "BULLISH"
+                confidence = min(((rsi - 50) / 20) * 100, 100)  # Scale confidence
+            elif current_price < sma20 and current_price < sma50 and rsi < 50 and macd < signal:
+                action = "SELL"
+                direction = "BEARISH"
+                confidence = min(((50 - rsi) / 20) * 100, 100)  # Scale confidence
             
             return {
-                'direction': direction,
-                'analysis': analysis,
                 'action': action,
-                'confidence': confidence
+                'direction': direction,
+                'confidence': confidence,
+                'analysis': analysis_text,
+                'data': {
+                    'price': current_price,
+                    'sma20': sma20,
+                    'sma50': sma50,
+                    'rsi': rsi,
+                    'macd': macd
+                }
             }
             
         except Exception as e:
             print(f"❌ Error in chart analysis: {str(e)}")
             traceback.print_exc()
             return None
-            
+
+    def _calculate_rsi(self, prices, period=14):
+        """Calculate RSI indicator"""
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    def _calculate_macd(self, prices, fast=12, slow=26, signal=9):
+        """Calculate MACD indicator"""
+        exp1 = prices.ewm(span=fast, adjust=False).mean()
+        exp2 = prices.ewm(span=slow, adjust=False).mean()
+        macd = exp1 - exp2
+        signal_line = macd.ewm(span=signal, adjust=False).mean()
+        histogram = macd - signal_line
+        return macd, signal_line, histogram
+
     def _format_announcement(self, symbol, timeframe, analysis):
-        """Format analysis into speech-friendly message"""
+        """Format analysis results into announcement"""
         try:
-            if not analysis:
-                return None
-                
-            # Convert timeframe to speech-friendly format
-            friendly_timeframe = timeframe.replace('m', ' minute').replace('h', ' hour').replace('d', ' day')
-                
-            message = (
-                f"hi, Moon Dev seven seven seven! Chart analysis for {symbol} on the {friendly_timeframe} timeframe! "
-                f"The trend is {analysis['direction']}. {analysis['analysis']} "
-                f"AI suggests to {analysis['action']} with {analysis['confidence']}% confidence! "
+            # Get price with proper precision
+            price = analysis['data']['price']
+            precision = 8 if price < 0.01 else 6  # Use 8 decimals for small numbers
+            
+            announcement = (
+                f"hi, Billy Bitcoin. In the Morning! Chart analysis for {symbol} "
+                f"on the {timeframe} timeframe! The trend is {analysis['direction']}. "
+                f"📊 {symbol} {timeframe} Analysis:\n"
+                f"- Price: ${price:.{precision}f}\n"
+                f"- RSI: {analysis['data']['rsi']:.2f}\n"
+                f" AI suggests to {analysis['action']} with {analysis['confidence']}% confidence! "
             )
-            
-            return message
-            
+            return announcement
         except Exception as e:
             print(f"❌ Error formatting announcement: {str(e)}")
             return None
@@ -302,8 +390,24 @@ class ChartAnalysisAgent(BaseAgent):
             
             response.stream_to_file(str(audio_file))
             
-            # Play audio
-            os.system(f"afplay {audio_file}")
+            # Try to play with mpg123 first (most Linux distros)
+            try:
+                result = os.system(f"which mpg123 > /dev/null 2>&1")
+                if result == 0:  # mpg123 is installed
+                    os.system(f"mpg123 -q {audio_file}")  # -q for quiet mode
+                else:
+                    # Try ffplay as fallback (comes with ffmpeg)
+                    result = os.system(f"which ffplay > /dev/null 2>&1")
+                    if result == 0:
+                        os.system(f"ffplay -nodisp -autoexit -loglevel quiet {audio_file}")
+                    else:
+                        print("⚠️ Please install either mpg123 or ffmpeg for audio playback:")
+                        print("   sudo apt-get install mpg123    # For Ubuntu/Debian")
+                        print("   sudo apt-get install ffmpeg    # Alternative option")
+                        print(f"💾 Audio file saved to: {audio_file}")
+            except Exception as e:
+                print(f"⚠️ Could not play audio: {str(e)}")
+                print(f"💾 Audio file saved to: {audio_file}")
             
         except Exception as e:
             print(f"❌ Error in announcement: {str(e)}")
@@ -311,48 +415,29 @@ class ChartAnalysisAgent(BaseAgent):
     def analyze_symbol(self, symbol, timeframe):
         """Analyze a single symbol on a specific timeframe"""
         try:
-            # Try getting data from each source
+            # Try getting data from Coinbase first
             data = None
-            
-            # Try Coinbase first
             try:
-                data = cb.get_data(
+                data = cb.get_historical_data(
                     symbol=symbol,
-                    timeframe=timeframe,
-                    bars=LOOKBACK_BARS,
-                    add_indicators=True
+                    granularity=self._convert_timeframe_to_seconds(timeframe),
+                    days_back=int(LOOKBACK_BARS * self._get_timeframe_multiplier(timeframe))
                 )
+                
+                # Debug the raw data
+                print("\nRaw data from Coinbase:")
+                print(data.head())
+                
             except Exception as e:
                 print(f"📝 Coinbase data fetch failed: {str(e)}")
 
-            # If Coinbase fails, try nice_funcs
             if data is None or data.empty:
-                try:
-                    data = n.get_data(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        bars=LOOKBACK_BARS,
-                        add_indicators=True
-                    )
-                except Exception as e:
-                    print(f"📝 nice_funcs data fetch failed: {str(e)}")
-
-            # If both fail, try nice_funcs_hl
-            if data is None or data.empty:
-                try:
-                    data = hl.get_data(
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        bars=LOOKBACK_BARS,
-                        add_indicators=True
-                    )
-                except Exception as e:
-                    print(f"📝 nice_funcs_hl data fetch failed: {str(e)}")
-
-            if data is None or data.empty:
-                print(f"❌ No data available for {symbol} {timeframe} from any source")
+                print(f"❌ No data available for {symbol} {timeframe} from Coinbase")
                 return
 
+            # Set the 'start' column as the index
+            data.set_index('start', inplace=True)
+            
             # Calculate additional indicators
             if 'SMA20' not in data.columns:
                 data['SMA20'] = data['close'].rolling(window=20).mean()
@@ -367,28 +452,29 @@ class ChartAnalysisAgent(BaseAgent):
             if chart_path:
                 print(f"📈 Chart saved to: {chart_path}")
             
-            # Debug print the chart data
-            print("\n" + "╔" + "═" * 60 + "╗")
-            print(f"║    🌙 Chart Data for {symbol} {timeframe} - Last 5 Candles    ║")
-            print("╠" + "═" * 60 + "╣")
-            print(f"║ Time │ Open │ High │ Low │ Close │ Volume │")
-            print("╟" + "─" * 60 + "╢")
+            # Print market data once
+            print("\n" + "╔" + "═" * 100 + "╗")
+            print(f"║    🌙 Chart Data for {symbol} {timeframe} - Last 5 Candles" + " " * 45 + "║")
+            print("╠" + "═" * 100 + "╣")
+            print("║ Time                │ Open          │ High          │ Low           │ Close         │ Volume      ║")
+            print("╟" + "─" * 100 + "╢")
             
-            # Print last 5 candles with proper timestamp formatting
             last_5 = data.tail(5)
-            last_5.index = pd.to_datetime(last_5.index)
             for idx, row in last_5.iterrows():
-                time_str = idx.strftime('%Y-%m-%d %H:%M')  # Include date and time
-                print(f"║ {time_str} │ {row['open']:.2f} │ {row['high']:.2f} │ {row['low']:.2f} │ {row['close']:.2f} │ {row['volume']:.0f} │")
+                # Ensure the index is a datetime
+                time_str = idx.strftime('%Y-%m-%d %H:%M')
+                
+                print(f"║ {time_str:<16} │ {row['open']:12.8f} │ {row['high']:12.8f} │ {row['low']:12.8f} │ {row['close']:12.8f} │ {row['volume']:10.0f} ║")
             
-            print("\n║ Technical Indicators:")
-            print(f"║ SMA20: {data['SMA20'].iloc[-1]:.2f}")
-            print(f"║ SMA50: {data['SMA50'].iloc[-1]:.2f}")
-            print(f"║ SMA200: {data['SMA200'].iloc[-1] if not pd.isna(data['SMA200'].iloc[-1]) else 'Not enough data'}")
-            print(f"║ 24h High: {data['high'].max():.2f}")
-            print(f"║ 24h Low: {data['low'].min():.2f}")
-            print(f"║ Volume Trend: {'Increasing' if data['volume'].iloc[-1] > data['volume'].mean() else 'Decreasing'}")
-            print("╚" + "═" * 60 + "╝")
+            print("║" + " " * 100 + "║")
+            print("║ Technical Indicators:" + " " * 79 + "║")
+            print(f"║ SMA20: {data['SMA20'].iloc[-1]:.8f}" + " " * 85 + "║")
+            print(f"║ SMA50: {data['SMA50'].iloc[-1]:.8f}" + " " * 85 + "║")
+            print(f"║ SMA200: {data['SMA200'].iloc[-1]:.8f}" + " " * 84 + "║")
+            print(f"║ 24h High: {data['high'].max():.8f}" + " " * 83 + "║")
+            print(f"║ 24h Low: {data['low'].min():.8f}" + " " * 84 + "║")
+            print(f"║ Volume Trend: {'Increasing' if data['volume'].iloc[-1] > data['volume'].mean() else 'Decreasing'}" + " " * 75 + "║")
+            print("╚" + "═" * 100 + "╝")
                 
             # Analyze with AI
             print(f"\n🔍 Analyzing {symbol} {timeframe}...")
@@ -402,7 +488,7 @@ class ChartAnalysisAgent(BaseAgent):
                     
                 # Print analysis in a nice box
                 print("\n" + "╔" + "═" * 50 + "╗")
-                print(f"║    🌙 Moon Dev's Chart Analysis - {symbol} {timeframe}   ║")
+                print(f"║    🌙 Billy Bitcoin's Chart Analysis - {symbol} {timeframe}   ║")
                 print("╠" + "═" * 50 + "╣")
                 print(f"║  Direction: {analysis['direction']:<41} ║")
                 print(f"║  Action: {analysis['action']:<44} ║")
@@ -432,21 +518,50 @@ class ChartAnalysisAgent(BaseAgent):
             # Clean up old charts before starting new cycle
             self._cleanup_old_charts()
             
-            for symbol in SYMBOLS:
+            results = {}  # Store results for each symbol/timeframe
+            
+            for symbol in self.symbols:
                 for timeframe in TIMEFRAMES:
-                    self.analyze_symbol(symbol, timeframe)
+                    # Get analysis result
+                    data = None
+                    try:
+                        data = cb.get_historical_data(
+                            symbol=symbol,
+                            granularity=self._convert_timeframe_to_seconds(timeframe),
+                            days_back=int(LOOKBACK_BARS * self._get_timeframe_multiplier(timeframe))
+                        )
+                    except Exception as e:
+                        print(f"Error getting data: {str(e)}")
+                        continue
+
+                    if data is not None:
+                        analysis = self._analyze_chart(symbol, timeframe, data)
+                        if analysis:
+                            # Store results
+                            if symbol not in results:
+                                results[symbol] = {}
+                            results[symbol][timeframe] = analysis
+                            
+                            # Format and announce if needed
+                            message = self._format_announcement(symbol, timeframe, analysis)
+                            if message:
+                                self._announce(message)
+                
                     time.sleep(2)  # Small delay between analyses
+                    
+            return results  # Return the analysis results
                     
         except Exception as e:
             print(f"❌ Error in monitoring cycle: {str(e)}")
-            
+            return {}  # Return empty dict on error
+
     def run(self):
         """Run the chart analysis monitor continuously"""
         print("\n🚀 Starting chart analysis monitoring...")
         
         while True:
             try:
-                self.run_monitoring_cycle()
+                results = self.run_monitoring_cycle()
                 print(f"\n💤 Sleeping for {CHECK_INTERVAL_MINUTES} minutes...")
                 time.sleep(CHECK_INTERVAL_MINUTES * 60)
                 
@@ -457,9 +572,15 @@ class ChartAnalysisAgent(BaseAgent):
                 print(f"❌ Error in main loop: {str(e)}")
                 time.sleep(60)  # Sleep for a minute before retrying
 
+    def update_symbols(self, new_symbols):
+        """Update the list of symbols to monitor"""
+        if new_symbols:
+            self.symbols = new_symbols
+            print(f"🔄 Updated symbols list: {', '.join(self.symbols)}")
+
 if __name__ == "__main__":
     # Create and run the agent
-    print("\n🌙 Moon Dev's Chart Analysis Agent Starting Up...")
+    print("\n🌙 Billy Bitcoin's Chart Analysis Agent Starting Up...")
     print("👋 Hey! I'm Chuck, your friendly chart analysis agent! 📊")
     print(f"🎯 Monitoring {len(SYMBOLS)} symbols: {', '.join(SYMBOLS)}")
     agent = ChartAnalysisAgent()

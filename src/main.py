@@ -1,5 +1,5 @@
 """
-🌙 Moon Dev's AI Trading System
+🌙 Billy Bitcoin's AI Trading System
 Main entry point for running trading agents
 """
 
@@ -21,6 +21,7 @@ from src.agents.risk_agent import RiskAgent
 from src.agents.strategy_agent import StrategyAgent
 from src.agents.copybot_agent import CopyBotAgent
 from src.agents.sentiment_agent import SentimentAgent
+from src.agents.chartanalysis_agent import ChartAnalysisAgent
 
 # Load environment variables
 load_dotenv()
@@ -29,9 +30,10 @@ load_dotenv()
 ACTIVE_AGENTS = {
     'risk': False,      # Risk management agent
     'trading': True,   # LLM trading agent
-    'strategy': False,  # Strategy-based trading agent
+    'strategy': True,  # Strategy-based trading agent
     'copybot': False,   # CopyBot agent
     'sentiment': False, # Run sentiment_agent.py directly instead
+    #'chartanalysis': True, # Chart Analysis Agent
     # whale_agent is run from whale_agent.py
     # Add more agents here as we build them:
     # 'portfolio': False,  # Future portfolio optimization agent
@@ -46,18 +48,20 @@ def run_agents():
         strategy_agent = StrategyAgent() if ACTIVE_AGENTS['strategy'] else None
         copybot_agent = CopyBotAgent() if ACTIVE_AGENTS['copybot'] else None
         sentiment_agent = SentimentAgent() if ACTIVE_AGENTS['sentiment'] else None
-
+        
+        # Note: ChartAnalysisAgent is now managed by TradingAgent
+        
         while True:
             try:
+                # Run Trading Analysis (which includes Chart Analysis)
+                if trading_agent:
+                    cprint("\n🤖 Running Trading Analysis...", "cyan")
+                    trading_agent.run_trading_cycle()
+                
                 # Run Risk Management
                 if risk_agent:
                     cprint("\n🛡️ Running Risk Management...", "cyan")
                     risk_agent.run()
-
-                # Run Trading Analysis
-                if trading_agent:
-                    cprint("\n🤖 Running Trading Analysis...", "cyan")
-                    trading_agent.run()
 
                 # Run Strategy Analysis
                 if strategy_agent:
@@ -85,7 +89,7 @@ def run_agents():
             except Exception as e:
                 cprint(f"\n❌ Error running agents: {str(e)}", "red")
                 cprint("🔄 Continuing to next cycle...", "yellow")
-                time.sleep(60)  # Sleep for 1 minute on error before retrying
+                time.sleep(60)
 
     except KeyboardInterrupt:
         cprint("\n👋 Gracefully shutting down...", "yellow")
@@ -94,7 +98,7 @@ def run_agents():
         raise
 
 if __name__ == "__main__":
-    cprint("\n🌙 Moon Dev AI Agent Trading System Starting...", "white", "on_blue")
+    cprint("\n🌙 Billy Bitcoin AI Agent Trading System Starting...", "white", "on_blue")
     cprint("\n📊 Active Agents:", "white", "on_blue")
     for agent, active in ACTIVE_AGENTS.items():
         status = "✅ ON" if active else "❌ OFF"

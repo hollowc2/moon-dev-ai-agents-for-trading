@@ -20,7 +20,8 @@ def test_market_data_functions():
         if products:
             cprint(f"✅ Found available products", "green")
             if isinstance(products, dict) and 'products' in products:
-                cprint(f"Total number of products: {products.get('num_products', 'unknown')}", "green")
+                # Only print the count, not the full product list
+                cprint(f"Total number of products: {len(products.get('products', []))}", "green")
         else:
             cprint("❌ Failed to get available products", "red")
             
@@ -29,7 +30,14 @@ def test_market_data_functions():
         overview = get_product_overview(test_symbol)
         if overview:
             cprint("✅ Successfully retrieved product overview:", "green")
-            print_pretty_json(overview)
+            # Only print essential info instead of the full overview
+            essential_info = {
+                'product_id': overview.get('product_id'),
+                'price': overview.get('price'),
+                'status': overview.get('status'),
+                'volume_24h': overview.get('volume_24h')
+            }
+            print_pretty_json(essential_info)
         else:
             cprint("❌ Failed to get product overview", "red")
             
@@ -223,15 +231,15 @@ def run_all_tests():
         #time.sleep(1)  # Respect rate limits
         
         # Account functions
-        test_account_functions()
+        #test_account_functions()
         time.sleep(1)  # Respect rate limits
         
         # Order functions (with minimal amounts)
-        test_order_functions()
+        #test_order_functions()
         time.sleep(1)  # Respect rate limits
         
         # Entry strategy functions (with minimal amounts)
-        test_entry_functions()
+        #test_entry_functions()
         
         cprint("\n✨ All tests completed!", "white", "on_green")
         

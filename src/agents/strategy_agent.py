@@ -1,5 +1,5 @@
 """
-🌙 Moon Dev's Strategy Agent
+🌙 Billy Bitcoin's Strategy Agent
 Handles all strategy-based trading decisions
 """
 
@@ -11,11 +11,11 @@ import os
 import importlib
 import inspect
 import time
-from src import nice_funcs as n
+from src import nice_funcs_cb as cb
 
 # 🎯 Strategy Evaluation Prompt
 STRATEGY_EVAL_PROMPT = """
-You are Moon Dev's Strategy Validation Assistant 🌙
+You are Billy Bitcoin's Strategy Validation Assistant 🌙
 
 Analyze the following strategy signals and validate their recommendations:
 
@@ -40,7 +40,7 @@ Respond in this format:
    - Confidence in each decision (0-100%)
 
 Remember:
-- Moon Dev prioritizes risk management! 🛡️
+- Billy Bitcoin prioritizes risk management! 🛡️
 - Multiple confirming signals increase confidence
 - Contradicting signals require deeper analysis
 - Better to reject a signal than risk a bad trade
@@ -54,15 +54,29 @@ class StrategyAgent:
         
         if ENABLE_STRATEGIES:
             try:
-                # Import strategies directly
-                from src.strategies.custom.example_strategy import ExampleStrategy
-                from src.strategies.custom.private_my_strategy import MyStrategy
+                # Load strategies from custom directory
+                strategy_dir = os.path.join('src', 'strategies', 'custom')
                 
-                # Initialize strategies
-                self.enabled_strategies.extend([
-                    ExampleStrategy(),
-                    MyStrategy()
-                ])
+                if os.path.exists(strategy_dir):
+                    for file in os.listdir(strategy_dir):
+                        if file.endswith('_strategy.py'):
+                            try:
+                                # Convert file path to module path
+                                module_path = f"src.strategies.custom.{file[:-3]}"
+                                
+                                # Import the module
+                                module = importlib.import_module(module_path)
+                                
+                                # Find strategy class in module
+                                for name, obj in inspect.getmembers(module):
+                                    if (inspect.isclass(obj) and 
+                                        name.endswith('Strategy') and 
+                                        name != 'BaseStrategy'):
+                                        self.enabled_strategies.append(obj())
+                                        break
+                                        
+                            except Exception as e:
+                                print(f"⚠️ Failed to load strategy from {file}: {e}")
                 
                 print(f"✅ Loaded {len(self.enabled_strategies)} strategies!")
                 for strategy in self.enabled_strategies:
@@ -73,7 +87,7 @@ class StrategyAgent:
         else:
             print("🤖 Strategy Agent is disabled in config.py")
         
-        print(f"🤖 Moon Dev's Strategy Agent initialized with {len(self.enabled_strategies)} strategies!")
+        print(f"🤖 Billy Bitcoin's Strategy Agent initialized with {len(self.enabled_strategies)} strategies!")
 
     def evaluate_signals(self, signals, market_data):
         """Have LLM evaluate strategy signals"""
@@ -88,6 +102,7 @@ class StrategyAgent:
                 model=AI_MODEL,
                 max_tokens=AI_MAX_TOKENS,
                 temperature=AI_TEMPERATURE,
+
                 messages=[{
                     "role": "user",
                     "content": STRATEGY_EVAL_PROMPT.format(
@@ -145,13 +160,19 @@ class StrategyAgent:
             for signal in signals:
                 print(f"  • {signal['strategy_name']}: {signal['direction']} ({signal['signal']}) for {signal['token']}")
             
-            # 2. Get market data for context
+            # 2. Get market data for context using Coinbase
             try:
-                from src.data.ohlcv_collector import collect_token_data
-                market_data = collect_token_data(token)
+                market_data = cb.get_historical_data(
+                    symbol=token,
+                    granularity=900,  # 15 minute candles
+                    days_back=3  # Get 3 days of data for context
+                )
+                if market_data is None:
+                    print("❌ Could not get market data from Coinbase")
+                    return []
             except Exception as e:
                 print(f"⚠️ Could not get market data: {e}")
-                market_data = {}
+                return []
             
             # 3. Have LLM evaluate the signals
             print("\n🤖 Getting LLM evaluation of signals...")
@@ -220,7 +241,7 @@ class StrategyAgent:
                 print("⚠️ No approved signals to execute")
                 return
 
-            print("\n🚀 Moon Dev executing strategy signals...")
+            print("\n🚀 Billy Bitcoin executing strategy signals...")
             print(f"📝 Received {len(approved_signals)} signals to execute")
             
             for signal in approved_signals:
@@ -247,8 +268,8 @@ class StrategyAgent:
                     max_position = usd_size * (MAX_POSITION_PERCENTAGE / 100)
                     target_size = max_position * strength
                     
-                    # Get current position value
-                    current_position = n.get_token_balance_usd(token)
+                    # Get current position value using Coinbase function
+                    current_position = cb.get_token_balance_usd(token)
                     
                     print(f"📊 Signal strength: {strength}")
                     print(f"🎯 Target position: ${target_size:.2f} USD")
@@ -257,7 +278,7 @@ class StrategyAgent:
                     if direction == 'BUY':
                         if current_position < target_size:
                             print(f"✨ Executing BUY for {token}")
-                            n.ai_entry(token, target_size)
+                            cb.market_buy_token_usd(token, target_size)  # Use Coinbase market buy
                             print(f"✅ Entry complete for {token}")
                         else:
                             print(f"⏸️ Position already at or above target size")
@@ -265,7 +286,7 @@ class StrategyAgent:
                     elif direction == 'SELL':
                         if current_position > 0:
                             print(f"📉 Executing SELL for {token}")
-                            n.chunk_kill(token, max_usd_order_size, slippage)
+                            cb.market_sell_token_amount(token, current_position)  # Use Coinbase market sell
                             print(f"✅ Exit complete for {token}")
                         else:
                             print(f"⏸️ No position to sell")
@@ -279,4 +300,4 @@ class StrategyAgent:
                 
         except Exception as e:
             print(f"❌ Error executing strategy signals: {str(e)}")
-            print("🔧 Moon Dev suggests checking the logs and trying again!") 
+            print("🔧 Billy Bitcoin suggests checking the logs and trying again!") 

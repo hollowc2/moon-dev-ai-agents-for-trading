@@ -7,7 +7,7 @@ from .base_strategy import BaseStrategy
 from src.config import MONITORED_TOKENS
 import pandas as pd
 from termcolor import cprint
-from src import nice_funcs as n
+from src import nice_funcs_cb as cb  # Use Coinbase instead of nice_funcs
 
 class SimpleMAStrategy(BaseStrategy):
     def __init__(self):
@@ -20,8 +20,12 @@ class SimpleMAStrategy(BaseStrategy):
         """Generate trading signals based on MA crossover"""
         try:
             for token in MONITORED_TOKENS:
-                # Get market data using nice_funcs
-                data = n.get_data(token, days_back=3, timeframe='15m')  
+                # Get market data using Coinbase
+                data = cb.get_historical_data(
+                    symbol=token,
+                    granularity=900,  # 15m in seconds
+                    days_back=3
+                )
                 if data is None or data.empty:
                     continue
                     

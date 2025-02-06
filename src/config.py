@@ -1,6 +1,6 @@
 """
-🌙 Moon Dev's Configuration File
-Built with love by Moon Dev 🚀
+🌙 Billy Bitcoin's Configuration File
+Built with love by Billy Bitcoin 🚀
 """
 
 # 💰 Trading Configuration
@@ -15,11 +15,11 @@ MONITORED_TOKENS = [
     'BTC-USD',    # Bitcoin
     'ETH-USD',    # Ethereum
     'SOL-USD',    # Solana
-    'AVAX-USD',   # Avalanche
+    'MOG-USD',
 ]
 
-# Moon Dev's Token Trading List 🚀
-# Each token is carefully selected by Moon Dev for maximum moon potential! 🌙
+# Billy Bitcoin's Token Trading List 🚀
+# Each token is carefully selected by Billy Bitcoin for maximum moon potential! 🌙
 tokens_to_trade = MONITORED_TOKENS
 
 # Token and wallet settings
@@ -51,7 +51,7 @@ MAX_LOSS_USD = 25  # Maximum loss in USD before stopping trading
 MAX_GAIN_USD = 25 # Maximum gain in USD before stopping trading
 
 # USD MINIMUM BALANCE RISK CONTROL
-MINIMUM_BALANCE_USD = 50  # If balance falls below this, risk agent will consider closing all positions
+MINIMUM_BALANCE_USD = 10  # If balance falls below this, risk agent will consider closing all positions
 USE_AI_CONFIRMATION = True  # If True, consult AI before closing positions. If False, close immediately on breach
 
 # Percentage-based limits (used if USE_PERCENTAGE is True)
@@ -146,3 +146,6 @@ LOGGING_CONFIG = {
 # Apply logging config
 import logging.config
 logging.config.dictConfig(LOGGING_CONFIG)
+
+# Trading Agent Settings
+REQUIRE_STRATEGY_SIGNALS = False  # If True, only trade with strategy confirmation

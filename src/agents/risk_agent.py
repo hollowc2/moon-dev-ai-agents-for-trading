@@ -59,6 +59,7 @@ from src.config import *
 from src.agents.base_agent import BaseAgent
 import traceback
 import logging
+import re
 
 # Load environment variables
 load_dotenv()
@@ -124,51 +125,33 @@ class RiskAgent(BaseAgent):
         cprint("🛡️ Risk Agent initialized!", "white", "on_blue")
         
     def get_portfolio_value(self):
-        """Calculate total portfolio value in USD"""
+        """Calculate total portfolio value in USD using Coinbase"""
         total_value = 0.0
         
         try:
             print("\n🔍 Moon Dev's Portfolio Value Calculator Starting... 🚀")
             
-            # Get USDC balance first
-            print("💵 Getting USDC balance...")
+            # Get USD balance first
+            print("💵 Getting USD balance...")
             try:
-                print(f"🔍 Checking USDC balance for address: {config.USDC_ADDRESS}")
-                # Try each data source in sequence - note cb doesn't have balance function
-                usdc_value = None
-                for func in [n.get_token_balance_usd, hl.get_token_balance_usd]:
-                    try:
-                        usdc_value = func(config.USDC_ADDRESS)
-                        if usdc_value is not None:
-                            break
-                    except Exception:
-                        continue
-                    
-                if usdc_value is not None:
-                    print(f"✅ USDC Value: ${usdc_value:.2f}")
-                    total_value += usdc_value
+                usd_value = cb.get_usd_balance()
+                if usd_value is not None:
+                    print(f"✅ USD Value: ${usd_value:.2f}")
+                    total_value += usd_value
                 else:
-                    print("❌ Could not get USDC balance from any source")
+                    print("❌ Could not get USD balance")
                 
             except Exception as e:
-                print(f"❌ Error getting USDC balance: {str(e)}")
+                print(f"❌ Error getting USD balance: {str(e)}")
                 traceback.print_exc()
 
-            # Get balance of each monitored token
+            # Get balance of each monitored token using Coinbase functions
             for token in config.MONITORED_TOKENS:
-                if token != config.USDC_ADDRESS:
+                if token != config.USDC_ADDRESS:  # Skip USDC since we got USD balance above
                     try:
                         print(f"\n🪙 Checking token: {token[:8]}...")
-                        # Try each data source in sequence - note cb doesn't have balance function
-                        token_value = None
-                        for func in [n.get_token_balance_usd, hl.get_token_balance_usd]:
-                            try:
-                                token_value = func(token)
-                                if token_value is not None:
-                                    break
-                            except Exception:
-                                continue
-                            
+                        token_value = cb.get_token_balance_usd(token)
+                        
                         if token_value is not None and token_value > 0:
                             print(f"💰 Found position worth: ${token_value:.2f}")
                             total_value += token_value
@@ -397,37 +380,36 @@ class RiskAgent(BaseAgent):
             return False
 
     def close_all_positions(self):
-        """Close all monitored positions except USDC and SOL"""
+        """Close all monitored positions except USDC using Coinbase"""
         try:
             cprint("\n🔄 Closing monitored positions...", "white", "on_cyan")
             
             # Get all positions
-            positions = n.fetch_wallet_holdings_og(address)
+            positions = []
+            for token in MONITORED_TOKENS:
+                if token not in EXCLUDED_TOKENS:
+                    try:
+                        value = cb.get_token_balance_usd(token)
+                        if value and value > 0:
+                            positions.append({
+                                'token': token,
+                                'value': value
+                            })
+                    except Exception as e:
+                        print(f"Error getting position for {token}: {str(e)}")
             
-            # Debug print to see what we're working with
-            cprint("\n📊 Current positions:", "cyan")
-            print(positions)
-            cprint("\n🎯 Monitored tokens:", "cyan")
-            print(MONITORED_TOKENS)
-            
-            # Filter for tokens that are both in MONITORED_TOKENS and not in EXCLUDED_TOKENS
-            positions = positions[
-                positions['Mint Address'].isin(MONITORED_TOKENS) & 
-                ~positions['Mint Address'].isin(EXCLUDED_TOKENS)
-            ]
-            
-            if positions.empty:
+            if not positions:
                 cprint("📝 No monitored positions to close", "white", "on_blue")
                 return
                 
             # Close each monitored position
-            for _, row in positions.iterrows():
-                token = row['Mint Address']
-                value = row['USD Value']
+            for position in positions:
+                token = position['token']
+                value = position['value']
                 
                 cprint(f"\n💰 Closing position: {token} (${value:.2f})", "white", "on_cyan")
                 try:
-                    n.chunk_kill(token, max_usd_order_size, slippage)
+                    cb.chunk_kill(token, max_usd_order_size=50000)
                     cprint(f"✅ Successfully closed position for {token}", "white", "on_green")
                 except Exception as e:
                     cprint(f"❌ Error closing position for {token}: {str(e)}", "white", "on_red")
@@ -483,8 +465,19 @@ class RiskAgent(BaseAgent):
                 self.close_all_positions()
                 return
                 
-            # Get all current positions using fetch_wallet_holdings_og
-            positions_df = n.fetch_wallet_holdings_og(address)
+            # Get all current positions using Coinbase
+            positions = []
+            for token in MONITORED_TOKENS:
+                if token not in EXCLUDED_TOKENS:
+                    try:
+                        value = cb.get_token_balance_usd(token)
+                        if value and value > 0:
+                            positions.append({
+                                'token': token,
+                                'value': value
+                            })
+                    except Exception as e:
+                        print(f"Error getting position for {token}: {str(e)}")
             
             # Prepare breach context
             if breach_type == "MINIMUM_BALANCE":
@@ -496,9 +489,8 @@ class RiskAgent(BaseAgent):
             
             # Format positions for AI
             positions_str = "\nCurrent Positions:\n"
-            for _, row in positions_df.iterrows():
-                if row['USD Value'] > 0:
-                    positions_str += f"- {row['Mint Address']}: {row['Amount']} (${row['USD Value']:.2f})\n"
+            for pos in positions:
+                positions_str += f"- {pos['token']}: ${pos['value']:.2f}\n"
                     
             # Get AI recommendation
             prompt = f"""
@@ -545,18 +537,6 @@ Then explain your reasoning.
                     }]
                 )
                 response_text = str(message.content)
-            
-            # Handle TextBlock format if using Claude
-            if 'TextBlock' in response_text:
-                match = re.search(r"text='([^']*)'", response_text)
-                if match:
-                    response_text = match.group(1)
-            
-            print("\n🤖 AI Risk Assessment:")
-            print("=" * 50)
-            print(f"Using model: {'DeepSeek' if self.deepseek_client else 'Claude'}")
-            print(response_text)
-            print("=" * 50)
             
             # Parse decision
             decision = response_text.split('\n')[0].strip()
