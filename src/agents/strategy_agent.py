@@ -162,11 +162,12 @@ class StrategyAgent:
             print(f"❌ Error generating signals: {str(e)}")
             return None
 
-    def get_signals(self, symbol):
+    def get_signals(self, symbol, data=None):
         """Get trading signals for a symbol"""
         try:
-            # Use centralized data fetching from nice_funcs_cb
-            data = cb.get_historical_data(symbol, granularity=3600, days_back=5)
+            # Use provided data or fetch new if needed
+            if data is None:
+                data = cb.get_historical_data(symbol, granularity=3600, days_back=5)
             
             if data.empty:
                 print(f"❌ No data available for {symbol}")

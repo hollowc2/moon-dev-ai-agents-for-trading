@@ -192,9 +192,17 @@ def get_time_range(days_back=10):
     return start_date.isoformat(), now.isoformat()
 
 def get_historical_data(symbol, granularity=3600, days_back=1):
-    """Get historical candle data for a product"""
+    """Get historical data for a product"""
     try:
         cprint(f"\n📊 Fetching historical data for {symbol}...", "white", "on_blue")
+        
+        # Calculate number of candles based on granularity and days
+        candles_needed = int((days_back * 24 * 3600) / granularity)
+        
+        # Limit to 300 candles (below Coinbase's 350 limit)
+        if candles_needed > 300:
+            days_back = (300 * granularity) / (24 * 3600)
+            print(f"⚠️ Limiting request to {days_back:.1f} days to stay within Coinbase's 300 candle limit")
         
         # Get Unix timestamp range
         start_unix, end_unix = get_unix_timestamp_range(days_back)
@@ -220,8 +228,11 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
         )
         
         if not response or not hasattr(response, 'candles') or not response.candles:
+            print("❌ No candle data received")
             return pd.DataFrame()
             
+        # Debug print
+        print(f"📊 Received {len(response.candles)} candles")
    
         data = []
         for candle in response.candles:
@@ -244,13 +255,18 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
         
         # Create DataFrame and set index
         df = pd.DataFrame(data)
+        if df.empty:
+            print("❌ No data after processing candles")
+            return df
+            
+        # Debug print DataFrame info
+        print("\n📊 DataFrame info:")
+        print(f"Columns: {df.columns.tolist()}")
+        print(f"Shape: {df.shape}")
+        print(f"First row: {df.iloc[0].to_dict()}")
+        
         df.set_index('start', inplace=True)
         df = df.sort_index()
-        
-        # # Debug print DataFrame info
-        # print("\nDebug - DataFrame info:")
-        # print(df.index.dtype)
-        # print(df.head())
         
         return df
         
@@ -701,35 +717,50 @@ def supply_demand_zones(symbol, timeframe=900, limit=300):
     timeframe: in seconds (e.g., 3600 for 1h)
     limit: number of candles to analyze
     """
-    sd_df = pd.DataFrame()
-    
-    # Get historical data
-    df = get_historical_data(symbol, granularity=timeframe, days_back=int(limit/24))
-    
-    # Only keep the data for as many bars as limit says
-    df = df[-limit:]
+    try:
+        sd_df = pd.DataFrame()
+        
+        # Get historical data
+        df = get_historical_data(symbol, granularity=timeframe, days_back=int(limit/24))
+        
+        if df.empty:
+            print("❌ No data available for supply/demand calculation")
+            return pd.DataFrame()
+            
+        # Debug print
+        print("\n📊 Supply/Demand calculation data:")
+        print(f"Columns available: {df.columns.tolist()}")
+        print(f"Data shape: {df.shape}")
+        
+        # Only keep the data for as many bars as limit says
+        df = df[-limit:]
 
-    # Calculate support and resistance, excluding the last two rows
-    if len(df) > 2:
-        df['support'] = df[:-2]['close'].min()
-        df['resis'] = df[:-2]['close'].max()
-    else:
-        df['support'] = df['close'].min()
-        df['resis'] = df['close'].max()
+        # Calculate support and resistance, excluding the last two rows
+        if len(df) > 2:
+            df['support'] = df[:-2]['close'].min()
+            df['resis'] = df[:-2]['close'].max()
+        else:
+            df['support'] = df['close'].min()
+            df['resis'] = df['close'].max()
 
-    supp = df.iloc[-1]['support']
-    resis = df.iloc[-1]['resis']
+        supp = df.iloc[-1]['support']
+        resis = df.iloc[-1]['resis']
 
-    df['supp_lo'] = df[:-2]['low'].min()
-    supp_lo = df.iloc[-1]['supp_lo']
+        df['supp_lo'] = df[:-2]['low'].min()
+        supp_lo = df.iloc[-1]['supp_lo']
 
-    df['res_hi'] = df[:-2]['high'].max()
-    res_hi = df.iloc[-1]['res_hi']
+        df['res_hi'] = df[:-2]['high'].max()
+        res_hi = df.iloc[-1]['res_hi']
 
-    sd_df['dz'] = [supp_lo, supp]
-    sd_df['sz'] = [res_hi, resis]
+        sd_df['dz'] = [supp_lo, supp]
+        sd_df['sz'] = [res_hi, resis]
 
-    return sd_df
+        return sd_df
+        
+    except Exception as e:
+        print(f"❌ Error in supply_demand_zones: {str(e)}")
+        traceback.print_exc()
+        return pd.DataFrame()
 
 def close_all_positions():
     """

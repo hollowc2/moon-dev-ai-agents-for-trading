@@ -39,8 +39,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Configuration
 CHECK_INTERVAL_MINUTES = 10
-TIMEFRAMES = ['5m']  # Coinbase supported timeframes: ['1m', '5m', '15m', '1h', '6h', '1d']
-LOOKBACK_BARS = 300
+TIMEFRAMES = ['15m', '1h']  # Coinbase supported timeframes: ['1m', '5m', '15m', '1h', '6h', '1d']
+LOOKBACK_BARS = 300  # Changed from 320 to 300 to stay within Coinbase's limit
 
 # Trading Pairs to Monitor - Update to use Coinbase format
 
@@ -78,6 +78,7 @@ Remember:
 - Look for confluence between multiple indicators
 - Volume should confirm price action
 - Consider the timeframe context
+- Look for confluence between multiple timeframes
 """
 
 class ChartAnalysisAgent(BaseAgent):
@@ -122,28 +123,95 @@ class ChartAnalysisAgent(BaseAgent):
     def _generate_chart(self, symbol, data):
         """Generate chart for analysis"""
         try:
+            # Ensure the charts directory exists
+            self.charts_dir.mkdir(parents=True, exist_ok=True)
+            
             # Convert data to DataFrame if needed
             if not isinstance(data, pd.DataFrame):
                 data = pd.DataFrame(data)
             
-            # Create chart filename
-            chart_filename = f"{symbol}_{int(time.time())}.png"
-            chart_path = os.path.join(self.charts_dir, chart_filename)
+            # Ensure data is properly formatted for mplfinance
+            if not isinstance(data.index, pd.DatetimeIndex):
+                data.index = pd.to_datetime(data.index)
             
-            # Generate chart using mplfinance
-            mpf.plot(
-                data,
-                type='candle',
-                volume=True,
-                title=f'\n{symbol} Chart',
-                style='charles',
-                savefig=chart_path
+            # Calculate supply and demand zones
+            sd_zones = cb.supply_demand_zones(symbol)
+            if not sd_zones.empty:
+                demand_zone = sd_zones['dz'].values
+                supply_zone = sd_zones['sz'].values
+            
+            # Create chart filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            chart_filename = f"{symbol}_{timestamp}.png"
+            chart_path = self.charts_dir / chart_filename
+            
+            print(f"📊 Generating chart: {chart_path}")
+            
+            # Configure chart style and indicators
+            mc = mpf.make_marketcolors(
+                up='green',
+                down='red',
+                edge='inherit',
+                wick='inherit',
+                volume='in',
+                inherit=True
             )
             
-            return chart_path
+            s = mpf.make_mpf_style(
+                marketcolors=mc,
+                gridstyle='dotted',
+                y_on_right=True
+            )
+            
+            # Add technical indicators
+            apds = []
+            
+            # Add SMA indicators
+            sma20 = mpf.make_addplot(data['SMA20'], color='blue', width=0.7)
+            sma50 = mpf.make_addplot(data['SMA50'], color='orange', width=0.7)
+            apds.extend([sma20, sma50])
+            
+            # Add RSI if available
+            if 'RSI' in data.columns:
+                rsi = mpf.make_addplot(data['RSI'], panel=2, color='purple', width=0.7)
+                apds.append(rsi)
+            
+            # Add supply and demand zones if available
+            if not sd_zones.empty:
+                # Create horizontal lines for demand zone
+                demand_low = pd.Series(demand_zone[0], index=data.index)
+                demand_high = pd.Series(demand_zone[1], index=data.index)
+                apds.append(mpf.make_addplot(demand_low, color='green', width=1, linestyle='--'))
+                apds.append(mpf.make_addplot(demand_high, color='green', width=1, linestyle='--'))
+                
+                # Create horizontal lines for supply zone
+                supply_low = pd.Series(supply_zone[0], index=data.index)
+                supply_high = pd.Series(supply_zone[1], index=data.index)
+                apds.append(mpf.make_addplot(supply_low, color='red', width=1, linestyle='--'))
+                apds.append(mpf.make_addplot(supply_high, color='red', width=1, linestyle='--'))
+            
+            # Generate and save the chart
+            fig, axes = mpf.plot(
+                data,
+                type='candle',
+                style=s,
+                title=f'\n{symbol} Price Chart',
+                volume=True,
+                addplot=apds,
+                panel_ratios=(6,2,2),  # Main chart, volume, RSI
+                figsize=(15,10),
+                savefig=chart_path,
+                returnfig=True
+            )
+            
+            plt.close(fig)  # Close the figure to free memory
+            
+            print(f"✅ Chart saved to: {chart_path}")
+            return str(chart_path)
             
         except Exception as e:
             print(f"❌ Error generating chart: {str(e)}")
+            traceback.print_exc()
             return None
 
     def _analyze_chart(self, symbol, timeframe, data):
@@ -151,13 +219,33 @@ class ChartAnalysisAgent(BaseAgent):
         try:
             # Ensure index is datetime
             if not isinstance(data.index, pd.DatetimeIndex):
-                data.index = pd.to_datetime(data.index, unit='s')  # Convert Unix timestamps to datetime
+                data.index = pd.to_datetime(data.index, unit='s')
             
-            # Calculate indicators first
+            # Calculate indicators
             data['SMA20'] = data['close'].rolling(window=20).mean()
             data['SMA50'] = data['close'].rolling(window=50).mean()
             data['RSI'] = self._calculate_rsi(data['close'])
             data['MACD'], data['Signal'], data['Hist'] = self._calculate_macd(data['close'])
+            
+            # Get supply and demand zones
+            sd_zones = cb.supply_demand_zones(symbol)
+            
+            # Calculate zone proximity factors
+            def calculate_zone_proximity(price, zone_low, zone_high):
+                """Calculate how close price is to a zone (0-1 scale)"""
+                zone_middle = (zone_high + zone_low) / 2
+                zone_range = zone_high - zone_low
+                
+                # Avoid division by zero
+                if zone_range == 0:
+                    return 0
+                    
+                # Calculate distance from price to zone middle
+                distance = abs(price - zone_middle)
+                
+                # Normalize distance to 0-1 scale (closer = higher value)
+                proximity = max(0, 1 - (distance / (zone_range * 2)))
+                return proximity
             
             # Get latest values
             current_price = data['close'].iloc[-1]
@@ -166,6 +254,23 @@ class ChartAnalysisAgent(BaseAgent):
             rsi = data['RSI'].iloc[-1]
             macd = data['MACD'].iloc[-1]
             signal = data['Signal'].iloc[-1]
+            
+            # Initialize base confidence from technical indicators
+            tech_confidence = 0
+            
+            # Get zone values if available
+            if not sd_zones.empty:
+                demand_zone = sd_zones['dz'].values
+                supply_zone = sd_zones['sz'].values
+                demand_low, demand_high = demand_zone
+                supply_low, supply_high = supply_zone
+                
+                # Calculate proximities
+                demand_proximity = calculate_zone_proximity(current_price, demand_low, demand_high)
+                supply_proximity = calculate_zone_proximity(current_price, supply_low, supply_high)
+            else:
+                demand_low = demand_high = supply_low = supply_high = None
+                demand_proximity = supply_proximity = 0
             
             # Determine decimal precision based on price
             def get_precision(value):
@@ -176,7 +281,7 @@ class ChartAnalysisAgent(BaseAgent):
             
             precision = get_precision(current_price)
             
-            # Format analysis text with dynamic precision
+            # Format analysis text with dynamic precision and zones
             analysis_text = (
                 f"📊 {symbol} {timeframe} Analysis:\n"
                 f"- Price: ${current_price:.{precision}f}\n"
@@ -186,34 +291,65 @@ class ChartAnalysisAgent(BaseAgent):
                 f"- MACD: {macd:.{precision}f}\n"
             )
             
-            # Print market data with proper precision
-            print("\n" + "╔" + "═" * 100 + "╗")
-            print(f"║    🌙 Chart Data for {symbol} {timeframe} - Last 5 Candles" + " " * 45 + "║")
-            print("╠" + "═" * 100 + "╣")
-            print("║ Time                │ Open          │ High          │ Low           │ Close         │ Volume      ║")
-            print("╟" + "─" * 100 + "╢")
+            if demand_low is not None:
+                analysis_text += (
+                    f"- Demand Zone: ${demand_low:.{precision}f} - ${demand_high:.{precision}f}\n"
+                    f"- Supply Zone: ${supply_low:.{precision}f} - ${supply_high:.{precision}f}\n"
+                )
             
-            last_5 = data.tail(5)
-            for idx, row in last_5.iterrows():
-                # Format timestamp to string
-                time_str = idx.strftime('%Y-%m-%d %H:%M')
-                print(f"║ {time_str:<16} │ {row['open']:.{precision}f} │ {row['high']:.{precision}f} │ "
-                      f"{row['low']:.{precision}f} │ {row['close']:.{precision}f} │ {row['volume']:10.2f} ║")
-            
-            # Determine signals
+            # Determine signals with enhanced zone-based confidence
             action = "NOTHING"
             confidence = 0
             direction = "SIDEWAYS"
             
-            # Simple strategy logic
-            if current_price > sma20 and current_price > sma50 and rsi > 50 and macd > signal:
-                action = "BUY"
-                direction = "BULLISH"
-                confidence = min(((rsi - 50) / 20) * 100, 100)  # Scale confidence
-            elif current_price < sma20 and current_price < sma50 and rsi < 50 and macd < signal:
-                action = "SELL"
-                direction = "BEARISH"
-                confidence = int(min(((50 - rsi) / 20) * 100, 100))  # Scale confidence
+            if demand_low is not None and supply_low is not None:
+                # Technical indicator confidence (0-100)
+                if current_price > sma20 and current_price > sma50:
+                    tech_confidence = 30
+                    if rsi > 50:
+                        tech_confidence += 20
+                    if macd > signal:
+                        tech_confidence += 20
+                elif current_price < sma20 and current_price < sma50:
+                    tech_confidence = 30
+                    if rsi < 50:
+                        tech_confidence += 20
+                    if macd < signal:
+                        tech_confidence += 20
+                
+                # Zone proximity confidence boost (0-30)
+                zone_confidence = 0
+                
+                # Bullish conditions
+                if (current_price > sma20 and current_price > sma50 and 
+                    rsi > 50 and macd > signal and 
+                    current_price > demand_high and current_price < supply_low):
+                    action = "BUY"
+                    direction = "BULLISH"
+                    
+                    # Add confidence based on proximity to demand zone
+                    zone_confidence = demand_proximity * 30
+                    
+                    # Higher confidence if price just bounced off demand zone
+                    if current_price < (demand_high + (supply_low - demand_high) * 0.3):
+                        zone_confidence *= 1.2  # 20% boost for optimal buy zone
+                    
+                # Bearish conditions
+                elif (current_price < sma20 and current_price < sma50 and 
+                      rsi < 50 and macd < signal and 
+                      current_price < supply_low and current_price > demand_low):
+                    action = "SELL"
+                    direction = "BEARISH"
+                    
+                    # Add confidence based on proximity to supply zone
+                    zone_confidence = supply_proximity * 30
+                    
+                    # Higher confidence if price just bounced off supply zone
+                    if current_price > (supply_low - (supply_low - demand_high) * 0.3):
+                        zone_confidence *= 1.2  # 20% boost for optimal sell zone
+                
+                # Calculate final confidence (70% technical + 30% zone-based)
+                confidence = min((tech_confidence * 0.7) + zone_confidence, 100)
             
             return {
                 'action': action,
@@ -225,7 +361,13 @@ class ChartAnalysisAgent(BaseAgent):
                     'sma20': sma20,
                     'sma50': sma50,
                     'rsi': rsi,
-                    'macd': macd
+                    'macd': macd,
+                    'demand_zone': [demand_low, demand_high] if demand_low is not None else None,
+                    'supply_zone': [supply_low, supply_high] if supply_low is not None else None,
+                    'zone_proximities': {
+                        'demand': demand_proximity if demand_low is not None else 0,
+                        'supply': supply_proximity if supply_low is not None else 0
+                    }
                 }
             }
             
@@ -322,7 +464,7 @@ class ChartAnalysisAgent(BaseAgent):
             if data is None:
                 data = cb.get_historical_data(
                     symbol=symbol,
-                    granularity=self._convert_timeframe_to_seconds('15m'),  # Default to 15m
+                    granularity=self._convert_timeframe_to_seconds('15m'),
                     days_back=int(LOOKBACK_BARS * self._get_timeframe_multiplier('15m'))
                 )
             
@@ -335,20 +477,30 @@ class ChartAnalysisAgent(BaseAgent):
                 data.set_index('start', inplace=True)
                 data.index = pd.to_datetime(data.index)
 
+            # Calculate indicators before generating chart
+            data['SMA20'] = data['close'].rolling(window=20).mean()
+            data['SMA50'] = data['close'].rolling(window=50).mean()
+            data['RSI'] = self._calculate_rsi(data['close'])
+            
             # Generate chart
+            print(f"\n📊 Generating chart for {symbol}...")
             chart_path = self._generate_chart(symbol, data)
+            if chart_path:
+                print(f"✅ Chart generated: {chart_path}")
+            else:
+                print("⚠️ Failed to generate chart")
             
             # Analyze chart
-            analysis = self._analyze_chart(symbol, '15m', data)  # Default to 15m timeframe
+            analysis = self._analyze_chart(symbol, '15m', data)
             
             if analysis:
                 # Format and print analysis
                 print("\n" + "╔" + "═" * 50 + "╗")
-                print(f"║    🌙 Billy Bitcoin's Chart Analysis - {symbol}    ║")
+                print(f"║    🌙 Billy Bitcoin's Chart Analysis - {symbol}   ║")
                 print("╠" + "═" * 50 + "╣")
-                print(f"║  Direction: {analysis['direction']:<41} ║")
-                print(f"║  Action: {analysis['action']:<44} ║")
-                print(f"║  Confidence: {analysis['confidence']}%{' ' * 37}║")
+                print(f"║  Direction: {analysis['direction']:<36} ║")
+                print(f"║  Action: {analysis['action']:<39} ║")
+                print(f"║  Confidence: {analysis['confidence']:.2f}%{' ' * 29}║")
                 print("╚" + "═" * 50 + "╝")
             
             return analysis

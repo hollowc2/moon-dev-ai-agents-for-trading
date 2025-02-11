@@ -89,6 +89,7 @@ class TradingAgent(BaseAgent):
     def __init__(self):
         """Initialize the Trading Agent"""
         super().__init__(agent_type="trading")
+        self.name = "Trading Agent"
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
         self.token_monitor = TokenMonitorAgent()
         self.chart_agent = ChartAnalysisAgent()
@@ -100,20 +101,21 @@ class TradingAgent(BaseAgent):
         # Initialize token monitoring
         self.update_monitored_tokens()
         print("🤖 Trading Agent initialized!")
+        
+        # Add cache for historical data
+        self.data_cache = {}
+        self.last_cache_update = {}
 
     def update_monitored_tokens(self):
-        """Update the list of monitored tokens"""
+        """Update the list of tokens to monitor"""
         try:
-            # Get updated token list from TokenMonitorAgent
-            new_tokens = self.token_monitor.run()
+            token_monitor = TokenMonitorAgent()
+            new_tokens = token_monitor.run()
             if new_tokens:
                 self.tokens = new_tokens
-                # Update chart agent's symbols
-                if hasattr(self, 'chart_agent'):
-                    self.chart_agent.symbols = self.tokens.copy()
-                
+                print(f"✅ Updated token list: {', '.join(self.tokens)}")
         except Exception as e:
-            print(f"❌ Error updating monitored tokens: {str(e)}")
+            print(f"❌ Error updating token list: {str(e)}")
 
     def get_portfolio_state(self):
         """Get current portfolio state from Coinbase"""
@@ -245,7 +247,7 @@ Strategy Signals Available:
             # Filter trading pairs to only include BUY recommendations
             trading_pairs = [
                 pair for pair in available_products 
-                if pair in buy_recommendations and
+                if pair in buy_recommendations and 
                 pair.endswith('-USD') and 
                 not any(stable in pair for stable in ['USDC', 'USDT', 'DAI', 'UST'])
             ]
@@ -543,55 +545,27 @@ Example format:
             print(f"❌ Unexpected error parsing allocations: {e}")
             return None
 
-    def get_data_from_sources(self, token, timeframe=DEFAULT_TIMEFRAME, bars=DEFAULT_BARS):
-        """Helper function to get data from available sources, prioritizing Coinbase
-        
-        Args:
-            token (str): Trading pair symbol
-            timeframe (str): Candle timeframe ('1m', '5m', '15m', '1h', '4h', '1d')
-            bars (int): Number of candles to fetch
-        """
-        if timeframe not in VALID_TIMEFRAMES:
-            raise ValueError(f"Invalid timeframe. Must be one of: {VALID_TIMEFRAMES}")
-        
-        data = None
-        
-        # Try Coinbase first using get_historical_data
-        try:
-            # Convert timeframe to seconds for Coinbase
-            granularity_map = {
-                '1m': 60,
-                '5m': 300,
-                '15m': 900,
-                '1h': 3600,
-                '4h': 14400,
-                '1d': 86400
-            }
-            
-            granularity = granularity_map[timeframe]
-            
-            data = cb.get_historical_data(
-                symbol=token,
-                granularity=granularity,  # Now using proper granularity mapping
-                days_back=bars  # Coinbase uses 'limit' instead of 'bars'
-            )
-            if data is not None:
-                print(f"✅ Got data from Coinbase for {token} using {timeframe} timeframe")
-                return data
-        except Exception as e:
-            print(f"📝 Coinbase data fetch failed: {str(e)}")
+    def get_cached_data(self, symbol, force_refresh=False):
+        """Get data from cache or fetch new if needed"""
+        current_time = datetime.now()
+        cache_ttl = timedelta(minutes=15)  # Match SLEEP_BETWEEN_RUNS_MINUTES
 
-        # Try other sources if Coinbase fails
-        for module in [cb]:  # Add any new nice_funcs modules here
-            try:
-                data = module.get_data(token, timeframe=timeframe, bars=bars)
-                if data is not None:
-                    print(f"✅ Got data from alternate source for {token}")
-                    return data
-            except Exception:
-                continue
-            
-        return data
+        # Check if we need to refresh the cache
+        needs_refresh = (
+            force_refresh or
+            symbol not in self.data_cache or
+            symbol not in self.last_cache_update or
+            (current_time - self.last_cache_update[symbol]) > cache_ttl
+        )
+
+        if needs_refresh:
+            data = cb.get_historical_data(symbol, granularity=3600, days_back=5)
+            if not data.empty:
+                self.data_cache[symbol] = data
+                self.last_cache_update[symbol] = current_time
+            return data
+        
+        return self.data_cache[symbol]
 
     def get_products_from_sources(self):
         """Helper function to get available products, prioritizing Coinbase"""
@@ -639,15 +613,28 @@ Example format:
                 
                 # Get data once and reuse
                 data = self.get_cached_data(token)
-                if data is not None:
-                    # Run chart analysis with the cached data
-                    if self.chart_agent:
-                        chart_analysis = self.chart_agent.analyze_chart(token, data)
-                        if chart_analysis:
-                            print(f"📈 Chart Analysis for {token}:")
-                            print(f"Action: {chart_analysis.get('action', 'NONE')}")
-                            print(f"Confidence: {chart_analysis.get('confidence', '0')}%")
-                            print(f"Direction: {chart_analysis.get('direction', 'NONE')}")
+                if data.empty:
+                    print(f"❌ No data available for {token}")
+                    continue
+
+                # Run chart analysis
+                if self.chart_agent:
+                    chart_analysis = self.chart_agent.analyze_chart(token, data)
+                    if chart_analysis:
+                        print(f"📈 Chart Analysis for {token}:")
+                        print(f"Action: {chart_analysis.get('action', 'NONE')}")
+                        print(f"Confidence: {chart_analysis.get('confidence', '0')}%")
+                        print(f"Reason: {chart_analysis.get('reason', 'No reason provided')}")
+                
+                # Run strategy analysis with same data
+                if self.strategy_agent:
+                    strategy_signals = self.strategy_agent.get_signals(token, data)
+                    if strategy_signals:
+                        print(f"📊 Strategy Signals for {token}:")
+                        for signal in strategy_signals:
+                            print(f"Strategy: {signal['strategy']}")
+                            print(f"Direction: {signal['direction']}")
+                            print(f"Strength: {signal['signal']}")
 
         except Exception as e:
             print(f"❌ Error in trading cycle: {str(e)}")
