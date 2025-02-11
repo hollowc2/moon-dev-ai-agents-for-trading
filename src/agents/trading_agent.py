@@ -74,6 +74,7 @@ from functools import wraps
 from prometheus_client import Counter, Gauge
 from pydantic_settings import BaseSettings
 import sys
+import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from src.config import *  # Import all config variables
 
@@ -259,11 +260,12 @@ Strategy Signals Available:
             confidence = 0
             for line in lines:
                 if 'confidence' in line.lower():
-                    # Extract number from string like "Confidence: 75%"
-                    try:
-                        confidence = int(''.join(filter(str.isdigit, line)))
-                    except:
-                        confidence = 50  # Default if not found
+                    # Extract number including decimals from string
+                    # like "Confidence: 75.5%" or "75.5% confidence"
+                    numbers = re.findall(r'\d+\.?\d*', line)
+                    if numbers:
+                        confidence = float(numbers[0])
+                        break
             
             # Add to recommendations DataFrame with proper reasoning
             reasoning = '\n'.join(lines[1:]) if len(lines) > 1 else "No detailed reasoning provided"
@@ -803,15 +805,16 @@ Example format:
             lines = analysis_text.split('\n')
             for line in lines:
                 if 'confidence' in line.lower():
-                    # Extract number from string like "Confidence: 75%" or "75% confidence"
-                    numbers = ''.join(filter(str.isdigit, line))
+                    # Extract number including decimals from string
+                    # like "Confidence: 75.5%" or "75.5% confidence"
+                    numbers = re.findall(r'\d+\.?\d*', line)
                     if numbers:
-                        confidence = float(numbers)
+                        confidence = float(numbers[0])
                         break
             
             # Ensure confidence is between 0 and 100
             confidence = max(0, min(100, confidence))
-            return confidence
+            return round(confidence, 2)  # Round to 2 decimal places
             
         except Exception as e:
             print(f"⚠️ Error extracting confidence: {str(e)}")

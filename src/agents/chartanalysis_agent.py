@@ -258,6 +258,18 @@ class ChartAnalysisAgent(BaseAgent):
             # Initialize base confidence from technical indicators
             tech_confidence = 0
             
+            # Calculate technical indicator confidence (0-50)
+            if current_price > sma20:
+                tech_confidence += 10
+            if current_price > sma50:
+                tech_confidence += 10
+            if rsi > 50:
+                tech_confidence += 10
+            if macd > signal:
+                tech_confidence += 10
+            if data['volume'].iloc[-1] > data['volume'].mean():
+                tech_confidence += 10
+            
             # Get zone values if available
             if not sd_zones.empty:
                 demand_zone = sd_zones['dz'].values
@@ -302,59 +314,52 @@ class ChartAnalysisAgent(BaseAgent):
             confidence = 0
             direction = "SIDEWAYS"
             
+            # Zone-based confidence (0-50)
+            zone_confidence = 0
+            
             if demand_low is not None and supply_low is not None:
-                # Technical indicator confidence (0-100)
-                if current_price > sma20 and current_price > sma50:
-                    tech_confidence = 30
-                    if rsi > 50:
-                        tech_confidence += 20
-                    if macd > signal:
-                        tech_confidence += 20
-                elif current_price < sma20 and current_price < sma50:
-                    tech_confidence = 30
-                    if rsi < 50:
-                        tech_confidence += 20
-                    if macd < signal:
-                        tech_confidence += 20
+                # Calculate price position relative to zones
+                price_range = supply_high - demand_low
+                if price_range > 0:
+                    relative_position = (current_price - demand_low) / price_range
+                    
+                    # Bullish conditions
+                    if current_price > sma20 and current_price > sma50:
+                        action = "BUY"
+                        direction = "BULLISH"
+                        
+                        # Higher confidence near demand zone
+                        zone_confidence = 50 * (1 - relative_position)
+                        
+                    # Bearish conditions
+                    elif current_price < sma20 and current_price < sma50:
+                        action = "SELL"
+                        direction = "BEARISH"
+                        
+                        # Higher confidence near supply zone
+                        zone_confidence = 50 * relative_position
+                        
+                    else:
+                        action = "NOTHING"
+                        direction = "SIDEWAYS"
+                        zone_confidence = 25  # Moderate confidence for no action
                 
-                # Zone proximity confidence boost (0-30)
-                zone_confidence = 0
-                
-                # Bullish conditions
-                if (current_price > sma20 and current_price > sma50 and 
-                    rsi > 50 and macd > signal and 
-                    current_price > demand_high and current_price < supply_low):
-                    action = "BUY"
-                    direction = "BULLISH"
-                    
-                    # Add confidence based on proximity to demand zone
-                    zone_confidence = demand_proximity * 30
-                    
-                    # Higher confidence if price just bounced off demand zone
-                    if current_price < (demand_high + (supply_low - demand_high) * 0.3):
-                        zone_confidence *= 1.2  # 20% boost for optimal buy zone
-                    
-                # Bearish conditions
-                elif (current_price < sma20 and current_price < sma50 and 
-                      rsi < 50 and macd < signal and 
-                      current_price < supply_low and current_price > demand_low):
-                    action = "SELL"
-                    direction = "BEARISH"
-                    
-                    # Add confidence based on proximity to supply zone
-                    zone_confidence = supply_proximity * 30
-                    
-                    # Higher confidence if price just bounced off supply zone
-                    if current_price > (supply_low - (supply_low - demand_high) * 0.3):
-                        zone_confidence *= 1.2  # 20% boost for optimal sell zone
-                
-                # Calculate final confidence (70% technical + 30% zone-based)
-                confidence = min((tech_confidence * 0.7) + zone_confidence, 100)
+            # Calculate final confidence (technical + zone-based)
+            confidence = tech_confidence + zone_confidence
+            
+            # Adjust confidence based on RSI extremes
+            if rsi > 70 and action == "SELL":
+                confidence *= 1.2  # 20% boost for overbought conditions
+            elif rsi < 30 and action == "BUY":
+                confidence *= 1.2  # 20% boost for oversold conditions
+            
+            # Ensure confidence stays within 0-100 range
+            confidence = min(max(confidence, 0), 100)
             
             return {
                 'action': action,
                 'direction': direction,
-                'confidence': confidence,
+                'confidence': round(confidence, 2),  # Round to 2 decimal places
                 'analysis': analysis_text,
                 'data': {
                     'price': current_price,
@@ -362,6 +367,7 @@ class ChartAnalysisAgent(BaseAgent):
                     'sma50': sma50,
                     'rsi': rsi,
                     'macd': macd,
+                    'volume': data['volume'].iloc[-1],
                     'demand_zone': [demand_low, demand_high] if demand_low is not None else None,
                     'supply_zone': [supply_low, supply_high] if supply_low is not None else None,
                     'zone_proximities': {
