@@ -33,6 +33,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from coinbase import jwt_generator
 import requests
+from time_utils import (
+    get_unix_timestamp_range,
+    convert_df_timestamps,
+    format_timestamp,
+    unix_to_datetime
+)
 
 load_dotenv(override=True)
 
@@ -136,16 +142,18 @@ def format_number(value):
     return f"{value:.{precision}f}"
 
 def get_product_price(symbol):
-    """Get current price for a product with proper precision"""
+    """Get current price for a trading pair"""
     try:
-        response = rest_client.get_product(product_id=symbol)
-        if response:
-            price = float(response.price)
-            return float(format_number(price))
-        return None
+        product = rest_client.get_product(product_id=symbol)
+        if product and hasattr(product, 'price'):
+            try:
+                return float(product.price)
+            except (ValueError, TypeError):
+                return 0
+        return 0
     except Exception as e:
-        print(f"Error getting product price: {str(e)}")
-        return None
+        print(f"❌ Error getting price for {symbol}: {str(e)}")
+        return 0
 
 def get_available_products():
     """
@@ -166,7 +174,7 @@ def get_available_products():
             ]
             
             # Sort by volume and get top 10
-            sorted_products = sorted(products, key=lambda x: x['volume'], reverse=True)[:2]  ### made it less for t4estin
+            sorted_products = sorted(products, key=lambda x: x['volume'], reverse=True)[:10]  ### made it less for t4estin
             return [p['product_id'] for p in sorted_products]
         return None
     except Exception as e:
@@ -184,28 +192,14 @@ def get_time_range(days_back=10):
     return start_date.isoformat(), now.isoformat()
 
 def get_historical_data(symbol, granularity=3600, days_back=1):
-    """
-    Get historical candle data for a product
-    Respects Coinbase's 350 candle limit
-    """
+    """Get historical candle data for a product"""
     try:
         cprint(f"\n📊 Fetching historical data for {symbol}...", "white", "on_blue")
         
-        # Use UTC time for consistency with Coinbase API
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(days=days_back)
+        # Get Unix timestamp range
+        start_unix, end_unix = get_unix_timestamp_range(days_back)
         
-        # # Debug time calculations
-        # print("\n🕒 Time calculations:")
-        # print(f"Current time (UTC): {datetime.utcnow()}")
-        # print(f"End time (UTC): {end_time}")
-        # print(f"Start time (UTC): {start_time}")
-        
-        # Convert to Unix timestamps
-        start_unix = int(start_time.timestamp())
-        end_unix = int(end_time.timestamp())
-        
-        # Update granularity map to match new API
+        # Get the Coinbase granularity string
         granularity_map = {
             60: "ONE_MINUTE",
             300: "FIVE_MINUTE",
@@ -216,41 +210,7 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             21600: "SIX_HOUR",
             86400: "ONE_DAY"
         }
-        
-        # If granularity is a string, convert it to seconds first
-        if isinstance(granularity, str):
-            reverse_map = {v: k for k, v in granularity_map.items()}
-            if granularity in reverse_map:
-                granularity = reverse_map[granularity]
-        
-        # Calculate how many candles we'll get based on time difference
-        time_diff_seconds = end_unix - start_unix
-        candles_requested = max(1, time_diff_seconds // granularity)  # Ensure at least 1 candle
-        
-        # Coinbase has different limits for different timeframes
-        max_candles = 300  # Default limit
-        if granularity == 60:  # 1-minute candles
-            max_candles = 1000  # Coinbase allows more for 1-minute data
-        
-        # If we're requesting more than max_candles, adjust days_back
-        if candles_requested > max_candles:
-            days_back = (max_candles * granularity) / (24 * 3600)
-            start_time = end_time - timedelta(days=days_back)
-            start_unix = int(start_time.timestamp())
-            cprint(f"⚠️ Adjusted request to {days_back:.1f} days to respect Coinbase's {max_candles} candle limit", "yellow")
-        
-        # Get the Coinbase granularity string
         cb_granularity = granularity_map.get(granularity, "ONE_HOUR")
-        
-        # # Debug info
-        # cprint(f"\nRequest details:", "cyan")
-        # print(f"Symbol: {symbol}")
-        # print(f"Start time (UTC): {start_time}")
-        # print(f"End time (UTC): {end_time}")
-        # print(f"Start timestamp: {start_unix}")
-        # print(f"End timestamp: {end_unix}")
-        # print(f"Granularity: {cb_granularity}")
-        # print(f"Expected candles: {int(candles_requested)}")
         
         response = rest_client.get_candles(
             product_id=symbol,
@@ -259,23 +219,22 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             granularity=cb_granularity
         )
         
-        if not response:
-            cprint(f"❌ No response received for {symbol}", "white", "on_red")
+        if not response or not hasattr(response, 'candles') or not response.candles:
             return pd.DataFrame()
             
-        if not hasattr(response, 'candles'):
-            cprint(f"❌ No candles data in response for {symbol}", "white", "on_red")
-            print("Response content:", response)
-            return pd.DataFrame()
-            
-        if not response.candles:
-            cprint(f"❌ Empty candles list for {symbol}", "white", "on_red")
-            return pd.DataFrame()
-        
+   
         data = []
         for candle in response.candles:
+            if not hasattr(candle, 'start') or candle.start is None:
+                continue
+                
+            # Convert timestamp when creating the data dictionary
+            timestamp = unix_to_datetime(int(candle.start))
+            if timestamp is None:
+                continue
+                
             data.append({
-                'start': pd.to_datetime(int(candle.start), unit='s'),  # Convert Unix timestamp to datetime
+                'start': timestamp,
                 'open': float(candle.open),
                 'high': float(candle.high),
                 'low': float(candle.low),
@@ -283,43 +242,22 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
                 'volume': float(candle.volume)
             })
         
-        if not data:
-            cprint(f"⚠️ No candle data returned for {symbol}", "yellow")
-            return pd.DataFrame()
-            
+        # Create DataFrame and set index
         df = pd.DataFrame(data)
+        df.set_index('start', inplace=True)
+        df = df.sort_index()
         
-        # Calculate indicators
-        if len(df) > 0:
-            cprint(f"✅ Successfully retrieved {len(df)} candles for {symbol}", "green")
-            # Moving averages
-            df['MA20'] = df['close'].rolling(window=20).mean()
-            df['MA40'] = df['close'].rolling(window=40).mean()
-            
-            # RSI
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-            
-            # Indicator crossovers and comparisons
-            df['Price_above_MA20'] = df['close'] > df['MA20']
-            df['Price_above_MA40'] = df['close'] > df['MA40']
-            df['MA20_above_MA40'] = df['MA20'] > df['MA40']
+        # # Debug print DataFrame info
+        # print("\nDebug - DataFrame info:")
+        # print(df.index.dtype)
+        # print(df.head())
         
-        # Convert data to proper precision
-        for col in ['open', 'high', 'low', 'close']:
-            if col in df.columns:
-                df[col] = df[col].apply(lambda x: float(format_number(x)))
-        
-        return df.sort_values('start', ascending=True)
+        return df
         
     except Exception as e:
-        cprint(f"❌ Error getting historical data for {symbol}: {str(e)}", "white", "on_red")
+        cprint(f"❌ Error getting historical data: {str(e)}", "white", "on_red")
         import traceback
-        print("Full error traceback:")
-        print(traceback.format_exc())
+        traceback.print_exc()
         return pd.DataFrame()
 
 def get_product_precision(symbol):
@@ -836,10 +774,10 @@ def close_all_positions():
             cprint("\n✨ All positions processed!", "white", "on_green")
             
         else:
-            cprint(f"❌ Failed to get accounts: {response.text}", "white", "on_red")
+            cprint(f"❌ Failed to get accounts: {response}", "red")
             
     except Exception as e:
-        cprint(f"❌ Error closing all positions: {str(e)}", "white", "on_red")
+        cprint(f"❌ Error closing all positions: {str(e)}", "red")
 
 def get_wallet_holdings():
     """
@@ -1072,3 +1010,50 @@ def sell_token_amount(token, amount):
     except Exception as e:
         print(f"❌ Market sell failed: {str(e)}")
         return False
+
+def get_product_24h_volume(symbol):
+    """Get 24h volume for a trading pair"""
+    try:
+        product = rest_client.get_product(product_id=symbol)
+        if product and hasattr(product, 'volume_24h'):
+            try:
+                return float(product.volume_24h)
+            except (ValueError, TypeError):
+                return 0
+        return 0
+    except Exception as e:
+        print(f"❌ Error getting volume for {symbol}: {str(e)}")
+        return 0
+
+def get_all_products():
+    """Get all available trading pairs from Coinbase"""
+    try:
+        response = rest_client.get_products()
+        if response and hasattr(response, 'products'):
+            # Filter for USD pairs and get volume data
+            usd_pairs = []
+            for product in response.products:
+                if product.product_id.endswith('-USD'):
+                    try:
+                        volume = float(product.volume_24h) if hasattr(product, 'volume_24h') else 0
+                        usd_pairs.append(product.product_id)
+                    except (ValueError, TypeError):
+                        continue
+            return usd_pairs
+        return []
+    except Exception as e:
+        print(f"❌ Error getting products: {str(e)}")
+        return []
+
+def get_accounts():
+    """Get all Coinbase accounts"""
+    try:
+        response = rest_client.get_accounts()
+        if response and hasattr(response, 'accounts'):
+            return response.accounts
+        else:
+            cprint(f"❌ Failed to get accounts: {response}", "red")
+            return None
+    except Exception as e:
+        cprint(f"❌ Error getting accounts: {str(e)}", "red")
+        return None

@@ -66,16 +66,16 @@ from termcolor import colored, cprint
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import time
+import traceback
 
 # Local imports
 from src.config import *
 from src import config
 from src import nice_funcs_cb as cb
-#Sfrom src.data.ohlcv_collector import collect_all_tokens
-from nice_funcs import get_data
 from src.agents.base_agent import BaseAgent
 from src.agents.chartanalysis_agent import ChartAnalysisAgent
 from src.agents.strategy_agent import StrategyAgent
+from src.agents.token_monitor_agent import TokenMonitorAgent
 
 # Load environment variables
 load_dotenv()
@@ -88,44 +88,32 @@ DEFAULT_BARS = 24
 class TradingAgent(BaseAgent):
     def __init__(self):
         """Initialize the Trading Agent"""
-        super().__init__(agent_type='trading')
-        
-        # Get available trading pairs from Coinbase first
-        self.symbols = self._get_trading_pairs()
-        
-        # Initialize other agents
-        self.chart_agent = ChartAnalysisAgent(symbols=self.symbols)  # Pass symbols to chart agent
-        self.strategy_agent = StrategyAgent()
+        super().__init__(agent_type="trading")
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+        self.token_monitor = TokenMonitorAgent()
+        self.chart_agent = ChartAnalysisAgent()
+        self.strategy_agent = StrategyAgent() if ENABLE_STRATEGIES else None
+        self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence'])
+        self.last_update = datetime.now()
+        self.tokens = ["BTC-USD", "ETH-USD"]  # Default starting tokens
         
-        # Get initial portfolio state from Coinbase
-        self.portfolio = self.get_portfolio_state()
-        
-        self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence', 'reasoning'])
-        self.strategy_signals = {}  # Initialize empty strategy signals dict
-        print("🤖 Billy Bitcoin's LLM Trading Agent initialized!")
+        # Initialize token monitoring
+        self.update_monitored_tokens()
+        print("🤖 Trading Agent initialized!")
 
-    def _get_trading_pairs(self):
-        """Get top trading pairs from Coinbase by volume"""
+    def update_monitored_tokens(self):
+        """Update the list of monitored tokens"""
         try:
-            # Use existing function from nice_funcs_cb
-            products = cb.get_available_products()
-            
-            if not products:
-                print("⚠️ No pairs found, defaulting to BTC-USD")
-                return ["BTC-USD"]
-            
-            # Print pairs for visibility
-            print("\n📊 Available USD trading pairs:")
-            for pair in products[:2]:  # Show first 2 pairs
-                print(f"🪙 {pair}")
-            
-            return products[:2]  # Return top pairs
-            
+            # Get updated token list from TokenMonitorAgent
+            new_tokens = self.token_monitor.run()
+            if new_tokens:
+                self.tokens = new_tokens
+                # Update chart agent's symbols
+                if hasattr(self, 'chart_agent'):
+                    self.chart_agent.symbols = self.tokens.copy()
+                
         except Exception as e:
-            print(f"❌ Error getting trading pairs: {str(e)}")
-            print("⚠️ Defaulting to BTC-USD")
-            return ["BTC-USD"]
+            print(f"❌ Error updating monitored tokens: {str(e)}")
 
     def get_portfolio_state(self):
         """Get current portfolio state from Coinbase"""
@@ -135,7 +123,7 @@ class TradingAgent(BaseAgent):
             portfolio = {'USDC-USD': usd_balance}
             
             # Get other token balances
-            for token in self.symbols:
+            for token in self.tokens:
                 if token != 'USDC-USD':
                     balance = cb.get_token_balance_usd(token)
                     if balance > 0:
@@ -374,7 +362,7 @@ Example format:
                                 success = cb.market_buy(token, entry_amount)
                             else:
                                 print(f"📈 Placing chunked order for ${entry_amount:.2f}")
-                                # Pass max_usd_order_size from config
+                                # Use ai_entry for larger orders which handles chunking
                                 success = cb.ai_entry(token, entry_amount, max_usd_order_size=config.max_usd_order_size)
                                 
                             if success:
@@ -635,40 +623,35 @@ Example format:
         self.run_trading_cycle()
 
     def run_trading_cycle(self):
-        """Run one trading cycle"""
+        """Run one complete trading cycle"""
         try:
-            # 1. Get strategy signals
-            signals = {}
-            for token in self.symbols:
-                token_signals = self.strategy_agent.get_signals(token)
-                if token_signals:
-                    signals[token] = token_signals
+            # Update token list every hour
+            if (datetime.now() - self.last_update).total_seconds() > 3600:
+                self.update_monitored_tokens()
+                self.last_update = datetime.now()
             
-            # 2. Get chart analysis signals (now with proper error handling)
-            chart_signals = self.chart_agent.run_monitoring_cycle() or {}
-            
-            # 3. Combine signals and execute trades
-            for token in self.symbols:
-                # Skip excluded tokens
+            # Process each token
+            for token in self.tokens:
                 if token in EXCLUDED_TOKENS:
                     continue
                     
-                # Combine signals from both sources
-                token_signals = signals.get(token, [])
-                token_chart = chart_signals.get(token, {})
+                print(f"\n📊 Analyzing {token}...")
                 
-                # If we have signals to act on
-                if token_signals or any(chart.get('action') in ['BUY', 'SELL'] 
-                                      for chart in token_chart.values()):
-                    if token_signals:
-                        # Execute strategy-based trades
-                        self.execute_strategy_signals(token_signals)
-                    elif any(chart.get('action') == 'SELL' for chart in token_chart.values()):
-                        # Handle exits based on chart analysis
-                        self.handle_exit(token)
-                        
+                # Get data once and reuse
+                data = self.get_cached_data(token)
+                if data is not None:
+                    # Run chart analysis with the cached data
+                    if self.chart_agent:
+                        chart_analysis = self.chart_agent.analyze_chart(token, data)
+                        if chart_analysis:
+                            print(f"📈 Chart Analysis for {token}:")
+                            print(f"Action: {chart_analysis.get('action', 'NONE')}")
+                            print(f"Confidence: {chart_analysis.get('confidence', '0')}%")
+                            print(f"Direction: {chart_analysis.get('direction', 'NONE')}")
+
         except Exception as e:
             print(f"❌ Error in trading cycle: {str(e)}")
+            traceback.print_exc()
 
     def execute_strategy_signals(self, signals):
         """Execute trades based on strategy signals"""

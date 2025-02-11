@@ -12,6 +12,7 @@ import importlib
 import inspect
 import time
 from src import nice_funcs_cb as cb
+import config
 
 # 🎯 Strategy Evaluation Prompt
 STRATEGY_EVAL_PROMPT = """
@@ -134,80 +135,50 @@ class StrategyAgent:
             print(f"❌ Error evaluating signals: {e}")
             return None
 
-    def get_signals(self, token):
-        """Get and evaluate signals from all enabled strategies"""
+    def _generate_signals(self, symbol, data):
+        """Generate trading signals based on strategy rules"""
         try:
-            # 1. Collect signals from all strategies
             signals = []
-            print(f"\n🔍 Analyzing {token} with {len(self.enabled_strategies)} strategies...")
             
+            # Run each enabled strategy
             for strategy in self.enabled_strategies:
-                signal = strategy.generate_signals()
-                if signal and signal['token'] == token:
-                    signals.append({
-                        'token': signal['token'],
-                        'strategy_name': strategy.name,
-                        'signal': signal['signal'],
-                        'direction': signal['direction'],
-                        'metadata': signal.get('metadata', {})
-                    })
+                try:
+                    signal = strategy.generate_signals(symbol, data)
+                    if signal:
+                        signals.append({
+                            'strategy': strategy.name,
+                            'token': symbol,
+                            'signal': signal.get('strength', 0),
+                            'direction': signal.get('direction', 'NOTHING'),
+                            'metadata': signal.get('metadata', {})
+                        })
+                except Exception as e:
+                    print(f"❌ Error in strategy {strategy.name}: {str(e)}")
+                    continue
             
-            if not signals:
-                print(f"ℹ️ No strategy signals for {token}")
-                return []
-            
-            print(f"\n📊 Raw Strategy Signals for {token}:")
-            for signal in signals:
-                print(f"  • {signal['strategy_name']}: {signal['direction']} ({signal['signal']}) for {signal['token']}")
-            
-            # 2. Get market data for context using Coinbase
-            try:
-                market_data = cb.get_historical_data(
-                    symbol=token,
-                    granularity=900,  # 15 minute candles
-                    days_back=3  # Get 3 days of data for context
-                )
-                if market_data is None:
-                    print("❌ Could not get market data from Coinbase")
-                    return []
-            except Exception as e:
-                print(f"⚠️ Could not get market data: {e}")
-                return []
-            
-            # 3. Have LLM evaluate the signals
-            print("\n🤖 Getting LLM evaluation of signals...")
-            evaluation = self.evaluate_signals(signals, market_data)
-            
-            if not evaluation:
-                print("❌ Failed to get LLM evaluation")
-                return []
-            
-            # 4. Filter signals based on LLM decisions
-            approved_signals = []
-            for signal, decision in zip(signals, evaluation['decisions']):
-                if "EXECUTE" in decision.upper():
-                    print(f"✅ LLM approved {signal['strategy_name']}'s {signal['direction']} signal")
-                    approved_signals.append(signal)
-                else:
-                    print(f"❌ LLM rejected {signal['strategy_name']}'s {signal['direction']} signal")
-            
-            # 5. Print final approved signals
-            if approved_signals:
-                print(f"\n🎯 Final Approved Signals for {token}:")
-                for signal in approved_signals:
-                    print(f"  • {signal['strategy_name']}: {signal['direction']} ({signal['signal']})")
-                
-                # 6. Execute approved signals
-                print("\n💫 Executing approved strategy signals...")
-                self.execute_strategy_signals(approved_signals)
-            else:
-                print(f"\n⚠️ No signals approved by LLM for {token}")
-            
-            return approved_signals
+            return signals if signals else None
             
         except Exception as e:
-            print(f"❌ Error getting strategy signals: {e}")
-            return []
+            print(f"❌ Error generating signals: {str(e)}")
+            return None
+
+    def get_signals(self, symbol):
+        """Get trading signals for a symbol"""
+        try:
+            # Use centralized data fetching from nice_funcs_cb
+            data = cb.get_historical_data(symbol, granularity=3600, days_back=5)
+            
+            if data.empty:
+                print(f"❌ No data available for {symbol}")
+                return None
+            
+            # Calculate indicators and generate signals
+            signals = self._generate_signals(symbol, data)
+            return signals
+            
+        except Exception as e:
+            print(f"❌ Error getting signals: {str(e)}")
+            return None
 
     def combine_with_portfolio(self, signals, current_portfolio):
         """Combine strategy signals with current portfolio state"""
@@ -268,6 +239,12 @@ class StrategyAgent:
                     max_position = usd_size * (MAX_POSITION_PERCENTAGE / 100)
                     target_size = max_position * strength
                     
+                    # Enforce minimum trade size
+                    if target_size < MIN_TRADE_SIZE_USD:
+                        print(f"⚠️ Target size ${target_size:.2f} is below minimum trade size of ${MIN_TRADE_SIZE_USD}")
+                        target_size = MIN_TRADE_SIZE_USD
+                        print(f"📈 Adjusted target size to minimum: ${target_size:.2f}")
+                    
                     # Get current position value using Coinbase function
                     current_position = cb.get_token_balance_usd(token)
                     
@@ -277,17 +254,24 @@ class StrategyAgent:
                     
                     if direction == 'BUY':
                         if current_position < target_size:
-                            print(f"✨ Executing BUY for {token}")
-                            cb.market_buy_token_usd(token, target_size)  # Use Coinbase market buy
-                            print(f"✅ Entry complete for {token}")
+                            size_to_buy = target_size - current_position
+                            if size_to_buy >= MIN_TRADE_SIZE_USD:
+                                print(f"✨ Executing BUY for {token}")
+                                self.execute_signal(signal)
+                                print(f"✅ Entry complete for {token}")
+                            else:
+                                print(f"⚠️ Buy size ${size_to_buy:.2f} is below minimum trade size of ${MIN_TRADE_SIZE_USD}")
                         else:
                             print(f"⏸️ Position already at or above target size")
                             
                     elif direction == 'SELL':
                         if current_position > 0:
-                            print(f"📉 Executing SELL for {token}")
-                            cb.market_sell_token_amount(token, current_position)  # Use Coinbase market sell
-                            print(f"✅ Exit complete for {token}")
+                            if current_position >= MIN_TRADE_SIZE_USD:
+                                print(f"📉 Executing SELL for {token}")
+                                self.execute_signal(signal)
+                                print(f"✅ Exit complete for {token}")
+                            else:
+                                print(f"⚠️ Current position ${current_position:.2f} is below minimum trade size of ${MIN_TRADE_SIZE_USD}")
                         else:
                             print(f"⏸️ No position to sell")
                     
@@ -301,3 +285,69 @@ class StrategyAgent:
         except Exception as e:
             print(f"❌ Error executing strategy signals: {str(e)}")
             print("🔧 Billy Bitcoin suggests checking the logs and trying again!") 
+
+    def calculate_position_size(self, signal_data):
+        """Calculate position size based on signal strength and portfolio size"""
+        try:
+            # Get signal confidence from metadata or signal strength
+            confidence = signal_data.get('metadata', {}).get('confidence', 0)
+            if isinstance(confidence, str):
+                confidence = float(confidence.strip('%'))
+            
+            # If no confidence in metadata, use signal strength
+            if confidence == 0:
+                confidence = float(signal_data.get('signal', 0))
+            
+            # Convert to decimal (0-1 range)
+            confidence = confidence / 100 if confidence > 1 else confidence
+            
+            # Calculate maximum position size based on portfolio
+            max_position = usd_size * (MAX_POSITION_PERCENTAGE / 100)
+            
+            # Scale position size by confidence
+            position_size = max_position * confidence
+            
+            # Ensure minimum position size
+            if position_size < MIN_TRADE_SIZE_USD:
+                print(f"⚠️ Calculated position size ${position_size:.2f} below minimum ${MIN_TRADE_SIZE_USD}")
+                return 0
+            
+            print(f"📊 Calculated position size: ${position_size:.2f} (confidence: {confidence:.2%})")
+            return position_size
+            
+        except Exception as e:
+            print(f"❌ Error calculating position size: {str(e)}")
+            return 0
+
+    def execute_signal(self, signal_data):
+        """Execute a trading signal"""
+        try:
+            token = signal_data['token']
+            direction = signal_data['direction']
+            
+            # Get position size based on strategy confidence
+            position_size = self.calculate_position_size(signal_data)
+            
+            if position_size == 0:
+                print("⚠️ Position size too small - skipping trade")
+                return False
+            
+            if direction == 'BUY':
+                # Simple market order for smaller amounts
+                if position_size <= 10000:
+                    print(f"📈 Placing single market order for ${position_size:.2f}")
+                    success = cb.market_buy(token, position_size)
+                else:
+                    print(f"📈 Placing chunked order for ${position_size:.2f}")
+                    # Use ai_entry for larger orders which handles chunking
+                    success = cb.ai_entry(token, position_size, max_usd_order_size=config.max_usd_order_size)
+                    
+            elif direction == 'SELL':
+                success = cb.chunk_kill(token, max_usd_order_size=config.max_usd_order_size)
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Error processing signal: {str(e)}")
+            print(f"Signal data: {signal_data}")
+            return False 

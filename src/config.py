@@ -3,6 +3,15 @@
 Built with love by Billy Bitcoin 🚀
 """
 
+from datetime import datetime
+import nice_funcs_cb as cb
+
+
+
+# Trading Agent Settings
+REQUIRE_STRATEGY_SIGNALS = False  # If True, only trade with strategy confirmation
+
+
 # 💰 Trading Configuration
 USDC_ADDRESS = "USDC-USD"  # Coinbase uses trading pair format
 SOL_ADDRESS = "SOL-USD"    # Coinbase uses trading pair format
@@ -11,16 +20,21 @@ SOL_ADDRESS = "SOL-USD"    # Coinbase uses trading pair format
 EXCLUDED_TOKENS = [USDC_ADDRESS, SOL_ADDRESS]
 
 # Token List for Trading 📋
+STABLECOIN_IDENTIFIERS = ['USDC', 'USDT', 'DAI', 'BUSD', 'UST', 'TUSD', 'USDP', 'GUSD']
+TOP_TOKENS_TO_MONITOR = 10  # Number of top tokens by volume to monitor
+
+# Add caching for trading pairs
+_cached_trading_pairs = None
+_last_cache_time = None
+
+
+
+# Dynamic token list - will be updated periodically
 MONITORED_TOKENS = [
     'BTC-USD',    # Bitcoin
-    'ETH-USD',    # Ethereum
-    'SOL-USD',    # Solana
-    'MOG-USD',
+    'ETH-USD'    # Ethereum
 ]
 
-# Billy Bitcoin's Token Trading List 🚀
-# Each token is carefully selected by Billy Bitcoin for maximum moon potential! 🌙
-tokens_to_trade = MONITORED_TOKENS
 
 # Token and wallet settings
 symbol = 'BTC-USD'  # Default trading pair
@@ -29,6 +43,7 @@ address = None      # Not needed for Coinbase
 # Position sizing 🎯
 usd_size = 10  # Size of position to hold
 max_usd_order_size = 3  # Max order size
+MIN_TRADE_SIZE_USD = 1.0  # Minimum trade size allowed by Coinbase
 tx_sleep = 1  # Reduced sleep between transactions for CEX
 slippage = 100  # 1% slippage (100 = 1%)
 
@@ -142,10 +157,7 @@ LOGGING_CONFIG = {
         }
     }
 }
-
 # Apply logging config
 import logging.config
 logging.config.dictConfig(LOGGING_CONFIG)
 
-# Trading Agent Settings
-REQUIRE_STRATEGY_SIGNALS = False  # If True, only trade with strategy confirmation

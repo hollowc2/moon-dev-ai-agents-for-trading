@@ -49,8 +49,6 @@ def run_agents():
         copybot_agent = CopyBotAgent() if ACTIVE_AGENTS['copybot'] else None
         sentiment_agent = SentimentAgent() if ACTIVE_AGENTS['sentiment'] else None
         
-        # Note: ChartAnalysisAgent is now managed by TradingAgent
-        
         while True:
             try:
                 # Run Trading Analysis (which includes Chart Analysis)
@@ -66,8 +64,8 @@ def run_agents():
                 # Run Strategy Analysis
                 if strategy_agent:
                     cprint("\n📊 Running Strategy Analysis...", "cyan")
-                    for token in MONITORED_TOKENS:
-                        if token not in EXCLUDED_TOKENS:  # Skip USDC and other excluded tokens
+                    for token in trading_agent.tokens:  # Use trading agent's token list
+                        if token not in EXCLUDED_TOKENS:
                             cprint(f"\n🔍 Analyzing {token}...", "cyan")
                             strategy_agent.get_signals(token)
 

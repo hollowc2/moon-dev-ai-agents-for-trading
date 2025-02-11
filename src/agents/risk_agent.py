@@ -147,19 +147,20 @@ class RiskAgent(BaseAgent):
 
             # Get balance of each monitored token using Coinbase functions
             for token in config.MONITORED_TOKENS:
-                if token != config.USDC_ADDRESS:  # Skip USDC since we got USD balance above
+                if token not in config.EXCLUDED_TOKENS:  # Skip excluded tokens
                     try:
-                        print(f"\n🪙 Checking token: {token[:8]}...")
+                        print(f"\n🪙 Checking token: {token}...")
                         token_value = cb.get_token_balance_usd(token)
                         
                         if token_value is not None and token_value > 0:
                             print(f"💰 Found position worth: ${token_value:.2f}")
                             total_value += token_value
                         else:
-                            print("ℹ️ No balance found for this token")
+                            print(f"ℹ️ No balance found for {token}")
                     except Exception as e:
-                        print(f"❌ Error getting balance for {token[:8]}: {str(e)}")
+                        print(f"❌ Error getting balance for {token}: {str(e)}")
                         traceback.print_exc()
+                        continue  # Continue checking other tokens even if one fails
             
             print(f"\n💎 Moon Dev's Total Portfolio Value: ${total_value:.2f} 🌙")
             return total_value
@@ -422,9 +423,9 @@ class RiskAgent(BaseAgent):
     def check_risk_limits(self):
         """Check if any risk limits have been breached"""
         try:
-            # Get current PnL
-            current_pnl = self.get_current_pnl()
+            # Get current portfolio value and calculate PnL
             current_balance = self.get_portfolio_value()
+            current_pnl = current_balance - self.start_balance
             
             print(f"\n💰 Current PnL: ${current_pnl:.2f}")
             print(f"💼 Current Balance: ${current_balance:.2f}")
@@ -553,27 +554,12 @@ Then explain your reasoning.
             print("⚠️ Error in AI consultation - defaulting to close all positions")
             self.close_all_positions()
 
-    def get_current_pnl(self):
-        """Calculate current PnL based on start balance"""
-        try:
-            current_value = self.get_portfolio_value()
-            print(f"\n💰 Start Balance: ${self.start_balance:.2f}")
-            print(f"📊 Current Value: ${current_value:.2f}")
-            
-            pnl = current_value - self.start_balance
-            print(f"📈 Current PnL: ${pnl:.2f}")
-            return pnl
-            
-        except Exception as e:
-            print(f"❌ Error calculating PnL: {str(e)}")
-            return 0.0
-
     def run(self):
         """Run the risk agent (implements BaseAgent interface)"""
         try:
-            # Get current PnL
-            current_pnl = self.get_current_pnl()
+            # Get current portfolio value and calculate PnL
             current_balance = self.get_portfolio_value()
+            current_pnl = current_balance - self.start_balance
             
             print(f"\n💰 Current PnL: ${current_pnl:.2f}")
             print(f"💼 Current Balance: ${current_balance:.2f}")

@@ -20,4 +20,5 @@ pillow>=10.2.0
 webdriver-manager>=4.0.1
 backtesting>=0.3.3
 TA-Lib>=0.4.24
+pytz
 # Add any other dependencies your agents need
