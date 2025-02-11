@@ -460,8 +460,11 @@ class ChartAnalysisAgent(BaseAgent):
     def analyze_chart(self, symbol, data=None):
         """Public method for chart analysis - wrapper for _analyze_chart"""
         try:
+            print(f"\n📊 Starting chart analysis for {symbol}...")
+            
             # If no data provided, fetch it
             if data is None:
+                print(f"🔄 Fetching historical data for {symbol}...")
                 data = cb.get_historical_data(
                     symbol=symbol,
                     granularity=self._convert_timeframe_to_seconds('15m'),
@@ -474,16 +477,18 @@ class ChartAnalysisAgent(BaseAgent):
 
             # Ensure data is properly formatted
             if not isinstance(data.index, pd.DatetimeIndex):
+                print("🔄 Converting timestamps...")
                 data.set_index('start', inplace=True)
                 data.index = pd.to_datetime(data.index)
 
             # Calculate indicators before generating chart
+            print("📈 Calculating technical indicators...")
             data['SMA20'] = data['close'].rolling(window=20).mean()
             data['SMA50'] = data['close'].rolling(window=50).mean()
             data['RSI'] = self._calculate_rsi(data['close'])
             
             # Generate chart
-            print(f"\n📊 Generating chart for {symbol}...")
+            print(f"🎨 Generating chart for {symbol}...")
             chart_path = self._generate_chart(symbol, data)
             if chart_path:
                 print(f"✅ Chart generated: {chart_path}")
@@ -491,10 +496,10 @@ class ChartAnalysisAgent(BaseAgent):
                 print("⚠️ Failed to generate chart")
             
             # Analyze chart
+            print("🔍 Analyzing chart patterns...")
             analysis = self._analyze_chart(symbol, '15m', data)
             
             if analysis:
-                # Format and print analysis
                 print("\n" + "╔" + "═" * 50 + "╗")
                 print(f"║    🌙 Billy Bitcoin's Chart Analysis - {symbol}   ║")
                 print("╠" + "═" * 50 + "╣")

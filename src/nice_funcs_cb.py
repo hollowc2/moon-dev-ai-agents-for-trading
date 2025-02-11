@@ -6,6 +6,7 @@ Built with love by Billy Bitcoin 🚀
 import logging
 import decimal
 import uuid
+import traceback
 
 # Disable all Coinbase-related logging
 logging.getLogger('coinbase').setLevel(logging.WARNING)
@@ -260,10 +261,10 @@ def get_historical_data(symbol, granularity=3600, days_back=1):
             return df
             
         # Debug print DataFrame info
-        print("\n📊 DataFrame info:")
-        print(f"Columns: {df.columns.tolist()}")
-        print(f"Shape: {df.shape}")
-        print(f"First row: {df.iloc[0].to_dict()}")
+        #print("\n📊 DataFrame info:")
+        #print(f"Columns: {df.columns.tolist()}")
+       # print(f"Shape: {df.shape}")
+        #print(f"First row: {df.iloc[0].to_dict()}")
         
         df.set_index('start', inplace=True)
         df = df.sort_index()
@@ -866,67 +867,30 @@ def get_wallet_token_single(symbol):
         return df[df['Currency'] == base_currency]
     return pd.DataFrame()
 
-# Update test function to handle empty responses
 def test_account_functions():
     """Test account and position related functions with detailed debugging"""
-    cprint("\n💰 Testing Account Functions...", "white", "on_blue")
-    
     try:
-        # Debug API credentials
-        cprint("\n🔑 Debugging API Credentials:", "yellow")
-        api_key = os.getenv("COINBASE_API_KEY")
-        secret_key = os.getenv("COINBASE_API_SECRET")[:50] + "..."  # Show first 50 chars
-        print(f"API Key: {api_key}")
-        print(f"Secret Key (truncated): {secret_key}")
-        
-        # Debug request details
-        request_path = '/api/v3/brokerage/accounts'
+        # Define the method and request path
         method = 'GET'
-        
-        cprint("\n📡 Request Details:", "yellow")
-        print(f"Request Path: {request_path}")
-        print(f"Method: {method}")
+        request_path = '/api/v3/brokerage/accounts'
         
         # Generate and display headers
         headers = get_coinbase_headers(method, request_path)
-        cprint("\n📨 Generated Headers:", "yellow")
-        safe_headers = {
-            k: (v[:50] + '...' if k == 'Authorization' else v)
-            for k, v in headers.items()
-        }
-        print_pretty_json(safe_headers)
         
         # Make the request with full debugging
-        cprint("\n🔄 Making API Request...", "yellow")
         full_url = f"https://api.coinbase.com{request_path}"
-        print(f"Full URL: {full_url}")
-        
         response = requests.get(full_url, headers=headers)
-        
-        cprint("\n📊 Response Details:", "yellow")
-        print(f"Status Code: {response.status_code}")
-        print(f"Response Headers:")
-        print_pretty_json(dict(response.headers))
-        
-        if response.text:  # Only try to parse JSON if there's content
-            print(f"Response Body:")
-            try:
-                print_pretty_json(response.json())
-            except:
-                print(f"Raw response: {response.text}")
-        else:
-            print("Empty response body")
         
         if response.status_code == 200:
             cprint("✅ API request successful!", "green")
+            return True
         else:
             cprint(f"❌ API request failed with status {response.status_code}", "red")
+            return False
             
     except Exception as e:
         cprint(f"❌ Error in account tests: {str(e)}", "red")
-        import traceback
-        print("\nFull error traceback:")
-        print(traceback.format_exc())
+        return False
 
 # Initialize WebSocket client (if needed)
 def init_websocket():

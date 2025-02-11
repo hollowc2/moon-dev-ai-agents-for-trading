@@ -5,8 +5,37 @@ Built with love by Billy Bitcoin 🚀
 
 from datetime import datetime
 import nice_funcs_cb as cb
+import os
+from dotenv import load_dotenv
 
+# Load environment variables
+load_dotenv()
 
+# Trading Agent Configuration
+ANTHROPIC_KEY: str = os.getenv('ANTHROPIC_KEY')
+AI_MODEL: str = os.getenv('AI_MODEL', "claude-3-sonnet-20240229")
+AI_MAX_TOKENS: int = int(os.getenv('AI_MAX_TOKENS', '4096'))
+AI_TEMPERATURE: float = float(os.getenv('AI_TEMPERATURE', '0.7'))
+SLEEP_BETWEEN_RUNS_MINUTES: int = int(os.getenv('SLEEP_BETWEEN_RUNS_MINUTES', '5'))
+MAX_POSITION_PERCENTAGE: float = float(os.getenv('MAX_POSITION_PERCENTAGE', '20.0'))
+CASH_PERCENTAGE: float = float(os.getenv('CASH_PERCENTAGE', '20.0'))
+
+# API Keys and Credentials
+BIRDEYE_API_KEY: str = os.getenv('BIRDEYE_API_KEY')
+RPC_ENDPOINT: str = os.getenv('RPC_ENDPOINT')
+MOONDEV_API_KEY: str = os.getenv('MOONDEV_API_KEY')
+SOLANA_PRIVATE_KEY: str = os.getenv('SOLANA_PRIVATE_KEY')
+OPENAI_KEY: str = os.getenv('OPENAI_KEY')
+TWITTER_USERNAME: str = os.getenv('TWITTER_USERNAME')
+TWITTER_EMAIL: str = os.getenv('TWITTER_EMAIL')
+TWITTER_PASSWORD: str = os.getenv('TWITTER_PASSWORD')
+COINBASE_API_KEY: str = os.getenv('COINBASE_API_KEY')
+COINBASE_API_SECRET: str = os.getenv('COINBASE_API_SECRET')
+
+# Trading Configuration 💰
+SLEEP_BETWEEN_RUNS_MINUTES = int(os.getenv('SLEEP_BETWEEN_RUNS_MINUTES', '5'))
+MAX_POSITION_PERCENTAGE = float(os.getenv('MAX_POSITION_PERCENTAGE', '20.0'))
+CASH_PERCENTAGE = float(os.getenv('CASH_PERCENTAGE', '20.0'))
 
 # Trading Agent Settings
 REQUIRE_STRATEGY_SIGNALS = False  # If True, only trade with strategy confirmation
@@ -48,14 +77,11 @@ tx_sleep = 1  # Reduced sleep between transactions for CEX
 slippage = 100  # 1% slippage (100 = 1%)
 
 # Risk Management Settings 🛡️
-CASH_PERCENTAGE = 20  # Minimum % to keep in USDC as safety buffer (0-100)
-MAX_POSITION_PERCENTAGE = 30  # Maximum % allocation per position (0-100)
 STOPLOSS_PRICE = 1 # NOT USED YET 1/5/25    
 BREAKOUT_PRICE = .0001 # NOT USED YET 1/5/25
 SLEEP_AFTER_CLOSE = 600  # Prevent overtrading
 
 MAX_LOSS_GAIN_CHECK_HOURS = 12  # How far back to check for max loss/gain limits (in hours)
-SLEEP_BETWEEN_RUNS_MINUTES = 15  # How long to sleep between agent runs 🕒
 
 
 # Max Loss/Gain Settings FOR RISK AGENT 1/5/25
@@ -85,14 +111,6 @@ sell_over = 1.01  # Sell when price is 1% above target
 DAYSBACK_4_DATA = 3
 DATA_TIMEFRAME = '1h'  # Changed to lowercase to match Coinbase format
 SAVE_OHLCV_DATA = False  # 🌙 Set to True to save data permanently, False will only use temp data during run
-
-# AI Model Settings 🤖
-AI_MODEL = "claude-3-haiku-20240307"  # Model Options:
-                                     # - claude-3-haiku-20240307 (Fast, efficient Claude model)
-                                     # - claude-3-sonnet-20240229 (Balanced Claude model)
-                                     # - claude-3-opus-20240229 (Most powerful Claude model)
-AI_MAX_TOKENS = 1024  # Max tokens for response
-AI_TEMPERATURE = 0.7  # Creativity vs precision (0-1)
 
 # Trading Strategy Agent Settings - MAY NOT BE USED YET 1/5/25
 ENABLE_STRATEGIES = True  # Set this to True to use strategies

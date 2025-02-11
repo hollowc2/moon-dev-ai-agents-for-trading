@@ -67,10 +67,18 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import time
 import traceback
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Any
+import asyncio
+from functools import wraps
+from prometheus_client import Counter, Gauge
+from pydantic_settings import BaseSettings
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from src.config import *  # Import all config variables
 
 # Local imports
-from src.config import *
-from src import config
+from src import config    # This allows using config.CONSTANT_NAME if needed
 from src import nice_funcs_cb as cb
 from src.agents.base_agent import BaseAgent
 from src.agents.chartanalysis_agent import ChartAnalysisAgent
@@ -80,37 +88,96 @@ from src.agents.token_monitor_agent import TokenMonitorAgent
 # Load environment variables
 load_dotenv()
 
-# Add at top of file with other constants
-VALID_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
-DEFAULT_TIMEFRAME = '15m'
-DEFAULT_BARS = 24
+@dataclass
+class TradingSignal:
+    token: str
+    chart_action: str
+    chart_confidence: float
+    strategy_signals: List[str]
+    timestamp: datetime = field(default_factory=datetime.now)
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int = 3, reset_timeout: int = 60):
+        self.failures = 0
+        self.last_failure = None
+        self.threshold = failure_threshold
+        self.timeout = reset_timeout
+
+    def can_execute(self) -> bool:
+        if self.last_failure and (datetime.now() - self.last_failure).seconds > self.timeout:
+            self.reset()
+        return self.failures < self.threshold
+
+def rate_limit(calls: int, period: int):
+    def decorator(func):
+        last_reset = time.time()
+        calls_made = 0
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            nonlocal last_reset, calls_made
+            
+            current_time = time.time()
+            if current_time - last_reset > period:
+                calls_made = 0
+                last_reset = current_time
+                
+            if calls_made >= calls:
+                sleep_time = period - (current_time - last_reset)
+                time.sleep(max(0, sleep_time))
+                calls_made = 0
+                last_reset = time.time()
+                
+            calls_made += 1
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+class MetricsCollector:
+    def __init__(self):
+        self.trades_executed = Counter('trades_executed', 'Number of trades executed')
+        self.position_size = Gauge('position_size', 'Current position size', ['token'])
+        self.analysis_duration = Gauge('analysis_duration', 'Time taken for analysis')
 
 class TradingAgent(BaseAgent):
-    def __init__(self):
+    def __init__(self, 
+                 client: anthropic.Anthropic,
+                 token_monitor: TokenMonitorAgent,
+                 chart_agent: ChartAnalysisAgent,
+                 strategy_agent: Optional[StrategyAgent] = None):
         """Initialize the Trading Agent"""
         super().__init__(agent_type="trading")
         self.name = "Trading Agent"
-        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
-        self.token_monitor = TokenMonitorAgent()
-        self.chart_agent = ChartAnalysisAgent()
-        self.strategy_agent = StrategyAgent() if ENABLE_STRATEGIES else None
+        self.client = client
+        self.token_monitor = token_monitor
+        self.chart_agent = chart_agent
+        self.strategy_agent = strategy_agent
         self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence'])
         self.last_update = datetime.now()
-        self.tokens = ["BTC-USD", "ETH-USD"]  # Default starting tokens
         
-        # Initialize token monitoring
-        self.update_monitored_tokens()
-        print("🤖 Trading Agent initialized!")
+        # Initialize tokens list at startup (only once)
+        cprint("\n🔄 Initializing monitored tokens list...", "white", "on_blue")
+        self.tokens = self.token_monitor.run()
+        self.last_token_update = datetime.now()
+        
+        # Initialize other attributes
+        self.current_positions = {}
+        self.trading_history = []
+        self.last_analysis_time = None
         
         # Add cache for historical data
         self.data_cache = {}
         self.last_cache_update = {}
+        self.circuit_breaker = CircuitBreaker()
+        self.metrics = MetricsCollector()
+        
+        print("🤖 Trading Agent initialized!")
 
     def update_monitored_tokens(self):
         """Update the list of tokens to monitor"""
         try:
-            token_monitor = TokenMonitorAgent()
-            new_tokens = token_monitor.run()
+            # Use existing token_monitor instance instead of creating new one
+            new_tokens = self.token_monitor.run()
             if new_tokens:
                 self.tokens = new_tokens
                 print(f"✅ Updated token list: {', '.join(self.tokens)}")
@@ -136,11 +203,16 @@ class TradingAgent(BaseAgent):
             print(f"❌ Error getting portfolio state: {e}")
             return {}
 
-    def analyze_market_data(self, token, market_data, strategy_signals=None):
+    def analyze_market_data(
+        self, 
+        token: str, 
+        market_data: pd.DataFrame, 
+        strategy_signals: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
         """Analyze market data using Claude"""
         try:
             # Skip analysis for excluded tokens
-            if token in EXCLUDED_TOKENS:
+            if token in config.EXCLUDED_TOKENS:
                 print(f"⚠️ Skipping analysis for excluded token: {token}")
                 return None
             
@@ -160,9 +232,9 @@ Strategy Signals Available:
                 strategy_context = "No strategy signals available."
             
             message = self.client.messages.create(
-                model=AI_MODEL,
-                max_tokens=AI_MAX_TOKENS,
-                temperature=AI_TEMPERATURE,
+                model=config.AI_MODEL,
+                max_tokens=config.AI_MAX_TOKENS,
+                temperature=config.AI_TEMPERATURE,
                 messages=[
                     {
                         "role": "user", 
@@ -226,8 +298,8 @@ Strategy Signals Available:
         """Get AI-recommended portfolio allocation"""
         try:
             cprint("\n💰 Calculating optimal portfolio allocation...", "cyan")
-            max_position_size = usd_size * (MAX_POSITION_PERCENTAGE / 100)
-            cprint(f"🎯 Maximum position size: ${max_position_size:.2f} ({MAX_POSITION_PERCENTAGE}% of ${usd_size:.2f})", "cyan")
+            max_position_size = config.usd_size * (config.MAX_POSITION_PERCENTAGE / 100)
+            cprint(f"🎯 Maximum position size: ${max_position_size:.2f} ({config.MAX_POSITION_PERCENTAGE}% of ${config.usd_size:.2f})", "cyan")
             
             # Filter for BUY recommendations only
             buy_recommendations = self.recommendations_df[
@@ -236,7 +308,7 @@ Strategy Signals Available:
             
             if not buy_recommendations:
                 cprint("ℹ️ No BUY recommendations found - keeping funds in USDC", "yellow")
-                return {"USDC-USD": usd_size}
+                return {"USDC-USD": config.usd_size}
             
             # Get available products from Coinbase
             available_products = cb.get_available_products()
@@ -254,17 +326,17 @@ Strategy Signals Available:
             
             # Get allocation from AI
             message = self.client.messages.create(
-                model=AI_MODEL,
-                max_tokens=AI_MAX_TOKENS,
-                temperature=AI_TEMPERATURE,
+                model=config.AI_MODEL,
+                max_tokens=config.AI_MAX_TOKENS,
+                temperature=config.AI_TEMPERATURE,
                 messages=[{
                     "role": "user", 
                     "content": f"""You are Billy Bitcoin's Portfolio Allocation AI 🌙
 
 Given:
-- Total portfolio size: ${usd_size}
-- Maximum position size: ${max_position_size} ({MAX_POSITION_PERCENTAGE}% of total)
-- Minimum cash (USDC) buffer: {CASH_PERCENTAGE}%
+- Total portfolio size: ${config.usd_size}
+- Maximum position size: ${max_position_size} ({config.MAX_POSITION_PERCENTAGE}% of total)
+- Minimum cash (USDC) buffer: {config.CASH_PERCENTAGE}%
 - Available trading pairs: {trading_pairs}
 - USDC-USD pair for cash allocation
 
@@ -290,8 +362,8 @@ Example format:
             
             # Validate allocation totals
             total_allocated = sum(allocations.values())
-            if total_allocated > usd_size:
-                cprint(f"❌ Total allocation ${total_allocated:.2f} exceeds portfolio size ${usd_size:.2f}", "red")
+            if total_allocated > config.usd_size:
+                cprint(f"❌ Total allocation ${total_allocated:.2f} exceeds portfolio size ${config.usd_size:.2f}", "red")
                 return None
             
             # Print allocations
@@ -308,6 +380,9 @@ Example format:
 
     def execute_allocations(self, allocation_dict):
         """Execute the allocations using AI entry for each position"""
+        if not self.circuit_breaker.can_execute():
+            print("⚠️ Circuit breaker active - skipping trades")
+            return
         try:
             print("\n🚀 Billy Bitcoin executing portfolio allocations...")
             
@@ -323,7 +398,7 @@ Example format:
                         print(f"⏭️ Skipping {token} - AI recommends {action}, not BUY")
                         continue
                 
-                if token in EXCLUDED_TOKENS:
+                if token in config.EXCLUDED_TOKENS:
                     print(f"💵 Keeping ${amount:.2f} in {token}")
                     continue
                     
@@ -399,7 +474,7 @@ Example format:
         for _, row in self.recommendations_df.iterrows():
             token = row['token']
             
-            if token in EXCLUDED_TOKENS:
+            if token in config.EXCLUDED_TOKENS:
                 continue
                 
             action = row['action']
@@ -548,7 +623,7 @@ Example format:
     def get_cached_data(self, symbol, force_refresh=False):
         """Get data from cache or fetch new if needed"""
         current_time = datetime.now()
-        cache_ttl = timedelta(minutes=15)  # Match SLEEP_BETWEEN_RUNS_MINUTES
+        cache_ttl = timedelta(minutes=config.SLEEP_BETWEEN_RUNS_MINUTES)  # Use config value
 
         # Check if we need to refresh the cache
         needs_refresh = (
@@ -592,49 +667,43 @@ Example format:
             
         return products
 
-    def run(self):
-        """Run the trading agent (implements BaseAgent interface)"""
-        self.run_trading_cycle()
-
-    def run_trading_cycle(self):
-        """Run one complete trading cycle"""
+    async def run_trading_cycle(self):
+        """Run a single trading cycle"""
         try:
-            # Update token list every hour
-            if (datetime.now() - self.last_update).total_seconds() > 3600:
-                self.update_monitored_tokens()
-                self.last_update = datetime.now()
-            
-            # Process each token
-            for token in self.tokens:
-                if token in EXCLUDED_TOKENS:
-                    continue
-                    
-                print(f"\n📊 Analyzing {token}...")
-                
-                # Get data once and reuse
-                data = self.get_cached_data(token)
-                if data.empty:
-                    print(f"❌ No data available for {token}")
-                    continue
+            # Update tokens list only if interval has passed
+            current_time = datetime.now()
+            if (current_time - self.last_token_update).total_seconds() >= (config.SLEEP_BETWEEN_RUNS_MINUTES * 60):
+                cprint("\n🔄 Updating monitored tokens list...", "white", "on_blue")
+                self.tokens = self.token_monitor.run()
+                self.last_token_update = current_time
+            else:
+                cprint("\n📋 Using existing tokens list...", "white", "on_blue")
 
-                # Run chart analysis
-                if self.chart_agent:
-                    chart_analysis = self.chart_agent.analyze_chart(token, data)
-                    if chart_analysis:
-                        print(f"📈 Chart Analysis for {token}:")
-                        print(f"Action: {chart_analysis.get('action', 'NONE')}")
-                        print(f"Confidence: {chart_analysis.get('confidence', '0')}%")
-                        print(f"Reason: {chart_analysis.get('reason', 'No reason provided')}")
+            signal_data = []
+            
+            # Process tokens concurrently
+            tasks = [self.analyze_token(token) for token in self.tokens]
+            results = await asyncio.gather(*tasks)
+            
+            signal_data.extend([r for r in results if r])
+            
+            # Generate and display summary table
+            if signal_data:
+                # Create DataFrame for better formatting
+                df = pd.DataFrame(signal_data)
                 
-                # Run strategy analysis with same data
-                if self.strategy_agent:
-                    strategy_signals = self.strategy_agent.get_signals(token, data)
-                    if strategy_signals:
-                        print(f"📊 Strategy Signals for {token}:")
-                        for signal in strategy_signals:
-                            print(f"Strategy: {signal['strategy']}")
-                            print(f"Direction: {signal['direction']}")
-                            print(f"Strength: {signal['signal']}")
+                # Format strategy signals as string
+                df['strategy_signals'] = df['strategy_signals'].apply(lambda x: '\n'.join(x) if x else 'No signals')
+                
+                # Print summary table
+                cprint("\n📊 Signal Summary Table:", "white", "on_blue")
+                print("\n" + df.to_string(index=False))
+                
+                # Save to CSV with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                csv_path = f'temp_data/signals_{timestamp}.csv'
+                df.to_csv(csv_path, index=False)
+                print(f"\n💾 Signal summary saved to: {csv_path}")
 
         except Exception as e:
             print(f"❌ Error in trading cycle: {str(e)}")
@@ -650,14 +719,14 @@ Example format:
             if direction == 'BUY':
                 cb.ai_entry(token, target_size)
             elif direction == 'SELL':
-                cb.chunk_kill(token, max_usd_order_size, slippage)
+                cb.chunk_kill(token, config.max_usd_order_size, config.slippage)
 
     def handle_exit(self, token):
         """Handle position exit"""
         try:
             current_position = cb.get_token_balance_usd(token)
             if current_position > 0:
-                cb.chunk_kill(token, max_usd_order_size, slippage)
+                cb.chunk_kill(token, config.max_usd_order_size, config.slippage)
         except Exception as e:
             print(f"❌ Error exiting position: {str(e)}")
 
@@ -670,15 +739,14 @@ Example format:
                 confidence = float(confidence.strip('%'))
             confidence = float(confidence) / 100  # Convert to decimal
             
-            # Calculate maximum position size based on portfolio
-            max_position = usd_size * (MAX_POSITION_PERCENTAGE / 100)
+            # Calculate maximum position size based on portfolio using config values
+            max_position = config.usd_size * (config.MAX_POSITION_PERCENTAGE / 100)
             
             # Scale position size by confidence
             position_size = max_position * confidence
             
-            # Ensure minimum position size
-            MIN_POSITION_SIZE = 10  # $10 minimum
-            if position_size < MIN_POSITION_SIZE:
+            # Ensure minimum position size using config value
+            if position_size < config.MIN_TRADE_SIZE_USD:
                 return 0
             
             return position_size
@@ -687,22 +755,95 @@ Example format:
             print(f"❌ Error calculating position size: {str(e)}")
             return 0
 
-def main():
-    """Main function to run the trading agent every 15 minutes"""
+    async def analyze_token(self, token):
+        """Analyze a single token and return signal data"""
+        try:
+            # Get market data
+            market_data = self.get_cached_data(token)
+            if market_data.empty:
+                print(f"⚠️ No market data available for {token}")
+                return None
+                
+            # Run chart analysis first
+            print(f"\n📊 Running chart analysis for {token}...")
+            chart_analysis = self.chart_agent.analyze_chart(token, market_data)
+            
+            if not chart_analysis:
+                print(f"⚠️ No chart analysis available for {token}")
+                return None
+            
+            # Get strategy signals if strategy agent is enabled
+            strategy_signals = None
+            if self.strategy_agent:
+                strategy_signals = await self.strategy_agent.get_signals(token)
+            
+            # Analyze market data
+            analysis = self.analyze_market_data(token, market_data, strategy_signals)
+            
+            if analysis:
+                return {
+                    'token': token,
+                    'chart_action': chart_analysis['action'],
+                    'chart_confidence': chart_analysis['confidence'],
+                    'strategy_signals': strategy_signals.get(token, []) if strategy_signals else []
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ Error analyzing {token}: {str(e)}")
+            traceback.print_exc()  # Add this to see full error trace
+            return None
+
+    def extract_confidence(self, analysis_text: str) -> float:
+        """Extract confidence percentage from analysis text"""
+        try:
+            # Look for confidence percentage in the text
+            confidence = 0
+            lines = analysis_text.split('\n')
+            for line in lines:
+                if 'confidence' in line.lower():
+                    # Extract number from string like "Confidence: 75%" or "75% confidence"
+                    numbers = ''.join(filter(str.isdigit, line))
+                    if numbers:
+                        confidence = float(numbers)
+                        break
+            
+            # Ensure confidence is between 0 and 100
+            confidence = max(0, min(100, confidence))
+            return confidence
+            
+        except Exception as e:
+            print(f"⚠️ Error extracting confidence: {str(e)}")
+            return 50.0  # Return default confidence if extraction fails
+
+async def main():
+    """Main function to run the trading agent"""
     cprint("🌙 Billy Bitcoin AI Trading System Starting Up! 🚀", "white", "on_blue")
     
-    agent = TradingAgent()
-    INTERVAL = SLEEP_BETWEEN_RUNS_MINUTES * 60  # Convert minutes to seconds
+    # Initialize agents
+    token_monitor = TokenMonitorAgent()
+    chart_agent = ChartAnalysisAgent()
+    strategy_agent = StrategyAgent() if config.ENABLE_STRATEGIES else None
+    
+    agent = TradingAgent(
+        anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY")),
+        token_monitor,
+        chart_agent,
+        strategy_agent
+    )
+    
+    INTERVAL = config.SLEEP_BETWEEN_RUNS_MINUTES * 60  # Use config value
     
     while True:
         try:
-            agent.run_trading_cycle()
+            # Properly await the async function
+            await agent.run_trading_cycle()
             
-            next_run = datetime.now() + timedelta(minutes=SLEEP_BETWEEN_RUNS_MINUTES)
+            next_run = datetime.now() + timedelta(minutes=config.SLEEP_BETWEEN_RUNS_MINUTES)
             cprint(f"\n⏳ AI Agent run complete. Next run at {next_run.strftime('%Y-%m-%d %H:%M:%S')}", "white", "on_green")
             
-            # Sleep until next interval
-            time.sleep(INTERVAL)
+            await asyncio.sleep(INTERVAL)
                 
         except KeyboardInterrupt:
             cprint("\n👋 Billy Bitcoin AI Agent shutting down gracefully...", "white", "on_blue")
@@ -710,8 +851,7 @@ def main():
         except Exception as e:
             cprint(f"\n❌ Error: {str(e)}", "white", "on_red")
             cprint("🔧 Billy Bitcoin suggests checking the logs and trying again!", "white", "on_blue")
-            # Still sleep and continue on error
-            time.sleep(INTERVAL)
+            await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
-    main() 
+    asyncio.run(main()) 

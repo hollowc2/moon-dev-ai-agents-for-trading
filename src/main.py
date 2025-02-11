@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 import time
 from datetime import datetime, timedelta
 from config import *
+from anthropic import Anthropic
+import asyncio  # Add this import at the top
+
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +25,7 @@ from src.agents.strategy_agent import StrategyAgent
 from src.agents.copybot_agent import CopyBotAgent
 from src.agents.sentiment_agent import SentimentAgent
 from src.agents.chartanalysis_agent import ChartAnalysisAgent
+from src.agents.token_monitor_agent import TokenMonitorAgent
 
 # Load environment variables
 load_dotenv()
@@ -39,11 +43,30 @@ ACTIVE_AGENTS = {
     # 'portfolio': False,  # Future portfolio optimization agent
 }
 
-def run_agents():
+async def run_agents():
     """Run all active agents in sequence"""
     try:
         # Initialize active agents
-        trading_agent = TradingAgent() if ACTIVE_AGENTS['trading'] else None
+        if ACTIVE_AGENTS['trading']:
+            # Create required components for TradingAgent
+            anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+            token_monitor = TokenMonitorAgent()
+            
+            # Initialize chart agent with proper configuration
+            print("\n🎯 Initializing Chart Analysis Agent...")
+            chart_agent = ChartAnalysisAgent()
+            
+            # Create trading agent with all components
+            trading_agent = TradingAgent(
+                client=anthropic_client,
+                token_monitor=token_monitor,
+                chart_agent=chart_agent,
+                strategy_agent=None  # Add strategy agent if needed
+            )
+            print("✅ Trading Agent initialized with Chart Analysis capabilities")
+        else:
+            trading_agent = None
+            
         risk_agent = RiskAgent() if ACTIVE_AGENTS['risk'] else None
         strategy_agent = StrategyAgent() if ACTIVE_AGENTS['strategy'] else None
         copybot_agent = CopyBotAgent() if ACTIVE_AGENTS['copybot'] else None
@@ -54,7 +77,7 @@ def run_agents():
                 # Run Trading Analysis (which includes Chart Analysis)
                 if trading_agent:
                     cprint("\n🤖 Running Trading Analysis...", "cyan")
-                    trading_agent.run_trading_cycle()
+                    await trading_agent.run_trading_cycle()  # Add await here
                 
                 # Run Risk Management
                 if risk_agent:
@@ -82,12 +105,12 @@ def run_agents():
                 # Sleep until next cycle
                 next_run = datetime.now() + timedelta(minutes=SLEEP_BETWEEN_RUNS_MINUTES)
                 cprint(f"\n😴 Sleeping until {next_run.strftime('%H:%M:%S')}", "cyan")
-                time.sleep(60 * SLEEP_BETWEEN_RUNS_MINUTES)
+                await asyncio.sleep(60 * SLEEP_BETWEEN_RUNS_MINUTES)  # Use asyncio.sleep instead of time.sleep
 
             except Exception as e:
                 cprint(f"\n❌ Error running agents: {str(e)}", "red")
                 cprint("🔄 Continuing to next cycle...", "yellow")
-                time.sleep(60)
+                await asyncio.sleep(60)  # Use asyncio.sleep here too
 
     except KeyboardInterrupt:
         cprint("\n👋 Gracefully shutting down...", "yellow")
@@ -103,4 +126,5 @@ if __name__ == "__main__":
         cprint(f"  • {agent.title()}: {status}", "white", "on_blue")
     print("\n")
 
-    run_agents()
+    # Run the async main function
+    asyncio.run(run_agents())
